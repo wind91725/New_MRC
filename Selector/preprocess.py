@@ -186,8 +186,6 @@ def count_length_distribution():
     print('q_count_dict is:', q_count_dict)
     print('p_count_dict is:', p_count_dict)
 
-
-
 def load_preprocessed_file():
     with open(args.out_dir + '/save/train_queries.json', 'r') as fp:
         train_queries = json.load(fp)
@@ -203,11 +201,13 @@ def load_preprocessed_file():
         dev_target = json.load(fp)
     return (train_queries, train_passages, train_target), (dev_queries, dev_passages, dev_target)
 
+
+
 def main():
     # format_file(args)
     # count_is_selected(args)
     # get_correct_answer(args)
-    count_length_distribution()
+    # count_length_distribution()
 
 
 if __name__ == '__main__':
