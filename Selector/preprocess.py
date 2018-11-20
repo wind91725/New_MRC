@@ -201,13 +201,42 @@ def load_preprocessed_file():
         dev_target = json.load(fp)
     return (train_queries, train_passages, train_target), (dev_queries, dev_passages, dev_target)
 
+def get_golden_passage(args):
+    get_golden_passage_split(args, 'train')
+    get_golden_passage_split(args, 'dev')
+    print('golden passage has processed.')
 
+def get_golden_passage_split(args, split):
+    # the output format of an example is golden_passage\tquery\tanswer
+    logger.info('loading preprocessed file...')
+    inp_file = os.path.join(args.out_dir, split + '_saved_in_line.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer.txt')
+    to_save = []
+    with open(inp_file, 'r') as f:
+        exs = f.readlines()
+        for ex in tqdm(exs, ascii = True, desc = 'progress report:'):
+            passages = ex.split('\t')[0]
+            query = ex.split('\t')[1]
+            answers = ex.split('\t')[2]
+            _passages = passages.split('#@#')
+            _answers = answers.split('#@#')
+            for psg in _passages:
+                parts = psg.split('@@')
+                is_selected = int(parts[0])
+                content = parts[1]
+                if is_selected == 1:
+                    for anw in _answers:
+                        if anw.strip():
+                            to_save.append('\t'.join((content, query, anw, '\n')))
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
 
 def main():
     # format_file(args)
     # count_is_selected(args)
     # get_correct_answer(args)
     # count_length_distribution()
+    get_golden_passage(args)
 
 
 if __name__ == '__main__':
