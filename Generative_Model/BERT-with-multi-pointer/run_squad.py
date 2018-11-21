@@ -90,7 +90,9 @@ class InputFeatures(object):
                  input_mask,
                  segment_ids,
                  start_position=None,
-                 end_position=None):
+                 end_position=None,
+                 answer_ids=None,
+                 answer_mask=None):
         self.unique_id = unique_id
         self.example_index = example_index
         self.doc_span_index = doc_span_index
@@ -102,7 +104,8 @@ class InputFeatures(object):
         self.segment_ids = segment_ids
         self.start_position = start_position
         self.end_position = end_position
-
+        self.answer_ids = answer_ids
+        self.answer_mask = answer_mask
 
 def read_squad_examples(input_file, is_training):
     """Read a SQuAD json file into a list of SquadExample."""
@@ -283,6 +286,15 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 doc_offset = len(query_tokens) + 2
                 start_position = tok_start_position - doc_start + doc_offset
                 end_position = tok_end_position - doc_start + doc_offset
+                # get the answer tokens and ids for multi pointer network.
+                answer_tokens = tokens[start_position:(end_position + 1)]
+                answer_tokens.insert(0, "[SEP]")
+                answer_ids = tokenizer.convert_tokens_to_ids(answer_tokens)
+                answer_ids = answer_ids[:16]                   # Suppose the answer's max_length is 15.      
+                answer_mask = [1] * len(answer_ids)
+                while len(answer_ids) < 15:
+                    answer_ids.append(0)
+                    answer_mask.append(0)
 
             if example_index < 20:
                 logger.info("*** Example ***")
@@ -320,7 +332,9 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     input_mask=input_mask,
                     segment_ids=segment_ids,
                     start_position=start_position,
-                    end_position=end_position))
+                    end_position=end_position,
+                    answer_ids=answer_ids,
+                    answer_mask=answer_mask))
             unique_id += 1
 
     return features
@@ -889,8 +903,10 @@ def main():
         all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
         all_start_positions = torch.tensor([f.start_position for f in train_features], dtype=torch.long)
         all_end_positions = torch.tensor([f.end_position for f in train_features], dtype=torch.long)
+        all_answer_ids = torch.tensor([f.answer_ids for f in train_features], dtype=torch.long)
+        all_answer_mask = torch.tensor([f.answer_mask for f in train_features], dtype=torch.long)
         train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                                   all_start_positions, all_end_positions)
+                                   all_start_positions, all_end_positions, all_answer_ids, all_answer_mask)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -902,8 +918,9 @@ def main():
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-                input_ids, input_mask, segment_ids, start_positions, end_positions = batch
-                loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions)
+                # input_ids, input_mask, segment_ids, start_positions, end_positions = batch
+                input_ids, input_mask, segment_ids, start_positions, end_positions, answer_ids, answer_mask = batch
+                loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions, answer_ids, answer_mask)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.fp16 and args.loss_scale != 1.0:
