@@ -142,8 +142,14 @@ class MultiHead(nn.Module):
 
     def forward(self, query, key, value, padding=None):
         query, key, value = self.wq(query), self.wk(key), self.wv(value)
+        # print('query size is:', query.size())
+        # print('key size is:', key.size())
+        # print('value size is:', value.size())
         query, key, value = (
             x.chunk(self.n_heads, -1) for x in (query, key, value))
+        # print('after chunk, query size is:', len(query), query[0].size())
+        # print('after chunk, key size is:', len(query), key[0].size())
+        # print('after chunk, value size is:', len(query), value[0].size())
         return torch.cat([self.attention(q, k, v, padding=padding)
                           for q, k, v in zip(query, key, value)], -1)
 
@@ -209,6 +215,8 @@ class TransformerDecoderLayer(nn.Module):
             dimension, dropout)
 
     def forward(self, x, encoding, context_padding=None, answer_padding=None):
+        # print('encding size is: ', encoding.size())
+        # exit(0)
         x = self.selfattn(x, x, x, padding=answer_padding)
         return self.feedforward(self.attention(x, encoding, encoding, padding=context_padding))
 
@@ -322,31 +330,31 @@ class Feedforward(nn.Module):
         return self.activation(self.linear(self.dropout(x)))
 
 
-class Embedding(nn.Module):
+# class Embedding(nn.Module):
 
-    def __init__(self, field, trained_dimension, dropout=0.0, project=True):
-        super().__init__()
-        self.field = field
-        self.project = project
-        dimension = 0
-        pretrained_dimension = field.vocab..size(-1)
-        self.pretrained_embeddings = [nn.Embedding(len(field.vocab), pretrained_dimension)]
-        self.pretrained_embeddings[0].weight.data = field.vocab.vectors
-        self.pretrained_embeddings[0].weight.requires_grad = False
-        dimension += pretrained_dimension
-        if self.project:
-            self.projection = Feedforward(dimension, trained_dimension)
-        dimension = trained_dimension
-        self.dropout = nn.Dropout(dropout)
-        self.dimension = dimension
+#     def __init__(self, field, trained_dimension, dropout=0.0, project=True):
+#         super().__init__()
+#         self.field = field
+#         self.project = project
+#         dimension = 0
+#         pretrained_dimension = field.vocab..size(-1)
+#         self.pretrained_embeddings = [nn.Embedding(len(field.vocab), pretrained_dimension)]
+#         self.pretrained_embeddings[0].weight.data = field.vocab.vectors
+#         self.pretrained_embeddings[0].weight.requires_grad = False
+#         dimension += pretrained_dimension
+#         if self.project:
+#             self.projection = Feedforward(dimension, trained_dimension)
+#         dimension = trained_dimension
+#         self.dropout = nn.Dropout(dropout)
+#         self.dimension = dimension
 
-    def forward(self, x, lengths=None, device=-1):
-        pretrained_embeddings = self.pretrained_embeddings[0](x.cpu()).to(x.device).detach()
-        return self.projection(pretrained_embeddings) if self.project else pretrained_embeddings
+#     def forward(self, x, lengths=None, device=-1):
+#         pretrained_embeddings = self.pretrained_embeddings[0](x.cpu()).to(x.device).detach()
+#         return self.projection(pretrained_embeddings) if self.project else pretrained_embeddings
 
-    def set_embeddings(self, w):
-        self.pretrained_embeddings[0].weight.data = w
-        self.pretrained_embeddings[0].weight.requires_grad = False
+#     def set_embeddings(self, w):
+#         self.pretrained_embeddings[0].weight.data = w
+#         self.pretrained_embeddings[0].weight.requires_grad = False
 
 
 class SemanticFusionUnit(nn.Module):

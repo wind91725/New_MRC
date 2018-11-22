@@ -24,9 +24,10 @@ import math
 import six
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from six import string_types
-from .common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask
+from common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask, TransformerDecoder
 
 PAD_INDEX = 0
 
@@ -505,19 +506,12 @@ class BertWithMultiPointer(nn.Module):
     ```
     """
     def __init__(self, config):
-        super(BertForQuestionAnswering, self).__init__()
+        super(BertWithMultiPointer, self).__init__()
         self.bert = BertModel(config)
         # TODO check with Google if it's normal there is no dropout on the token classifier of SQuAD in the TF version
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.decoderEmbedding = BERTEmbeddings(config)
-        # self.self_attentive_decoder = TransformerDecoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
-        self.self_attentive_decoder = TransformerDecoder(config.hidden_size, 3, 150, 2, 0.2)
-        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size, config.hidden_size,
-                                                      dropout=0.2, num_layers=1)
-        self.vocab_size = config.vocab_size
-        self.out = nn.Linear(config.hidden_size, self.vocab_size)
-
         def init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 # Slightly different from the TF version which uses truncated_normal for initialization
@@ -529,8 +523,15 @@ class BertWithMultiPointer(nn.Module):
             if isinstance(module, nn.Linear):
                 module.bias.data.zero_()
         self.apply(init_weights)
+        
+        # self.self_attentive_decoder = TransformerDecoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
+        self.self_attentive_decoder = TransformerDecoder(config.hidden_size, 3, 150, 2, 0.2)
+        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size, config.hidden_size,
+                                                      dropout=0.2, num_layers=1)
+        self.vocab_size = config.vocab_size
+        self.out = nn.Linear(config.hidden_size, self.vocab_size)
 
-    def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids, answer_mask):
+    def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
         sequence_output = all_encoder_layers[-1]
         if self.training:
@@ -538,57 +539,41 @@ class BertWithMultiPointer(nn.Module):
             answer_padding = answer_mask == 0
             self.dual_ptr_rnn_decoder.applyMasks(context_padding)
             answer_embedding = self.decoderEmbedding(answer_ids)
-            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding, positional_encodings=True)
+            # print('answer_embedding size is: ', answer_embedding.size())
+            # print('sequence_output is: ', sequence_output.size())
+            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), all_encoder_layers[-2:], context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, input_ids)
-            prob, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
+            probs, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
+            # print('prob size is')
             loss = F.nll_loss(probs.log(), targets)
             return loss, None
         else:
             return None, self.greedy(sequence_output, final_context, input_ids).data
 
-    def probs(self, generator, outputs, vocab_pointer_switches, context_question_attention, context_question_indices, oov_to_limited_idx=None):
-
-        size = list(outputs.size())
-
-        size[-1] = self.vocab_size
-        scores = generator(outputs.view(-1, outputs.size(-1))).view(size)
-        p_vocab = F.softmax(scores, dim=scores.dim()-1)
-        scaled_p_vocab = vocab_pointer_switches.expand_as(p_vocab) * p_vocab
-
-        effective_vocab_size = self.vocab_size # + len(oov_to_limited_idx) TODO: add the oov
-        if self.vocab_size < effective_vocab_size:
-            size[-1] = effective_vocab_size - self.generative_vocab_size
-            buff = scaled_p_vocab.new_full(size, EPSILON)
-            scaled_p_vocab = torch.cat([scaled_p_vocab, buff], dim=buff.dim()-1)
-
-        # p_context_ptr
-        scaled_p_vocab.scatter_add_(scaled_p_vocab.dim()-1, context_question_indices.unsqueeze(1).expand_as(context_question_attention), 
-            (1 - vocab_pointer_switches).expand_as(context_question_attention) * context_question_attention)
-
-        return scaled_p_vocab
-
-
     def greedy(self, self_attended_context, context, question, context_indices, question_indices, oov_to_limited_idx, rnn_state=None):
         B, TC, C = context.size()
-        T = self.args.max_output_length
-        outs = context.new_full((B, T), self.field.decoder_stoi['<pad>'], dtype=torch.long)
+        # T = self.args.max_output_length
+        T = 15 # suppose the max length of answer is 15
+        # outs = context.new_full((B, T), self.field.decoder_stoi['<pad>'], dtype=torch.long)
+        outs = context.new_full((B, T), 0, dtype=torch.long)
         hiddens = [self_attended_context[0].new_zeros((B, T, C))
                    for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] + positional_encodings_like(hiddens[0])
         eos_yet = context.new_zeros((B, )).byte()
     
-        rnn_output, context_alignment, question_alignment = None, None, None
+        rnn_output, context_question_alignment = None, None
         for t in range(T):
             if t == 0:
                 embedding = self.decoder_embeddings(
-                    self_attended_context[-1].new_full((B, 1), self.field.vocab.stoi['<init>'], dtype=torch.long), [1]*B)
+                    self_attended_context[-1].new_full((B, 1), "SEP", dtype=torch.long))
             else:
-                embedding = self.decoder_embeddings(outs[:, t - 1].unsqueeze(1), [1]*B)
-            hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1)
+                embedding = self.decoder_embeddings(outs[:, t - 1].unsqueeze(1))
+            # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1)
+            hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
@@ -611,8 +596,26 @@ class BertWithMultiPointer(nn.Module):
                 break
         return outs
 
+    def probs(self, generator, outputs, vocab_pointer_switches, context_question_attention, context_question_indices, oov_to_limited_idx=None):
 
+        size = list(outputs.size())
 
+        size[-1] = self.vocab_size
+        scores = generator(outputs.view(-1, outputs.size(-1))).view(size)
+        p_vocab = F.softmax(scores, dim=scores.dim()-1)
+        scaled_p_vocab = vocab_pointer_switches.expand_as(p_vocab) * p_vocab
+
+        effective_vocab_size = self.vocab_size # + len(oov_to_limited_idx) TODO: add the oov
+        if self.vocab_size < effective_vocab_size:
+            size[-1] = effective_vocab_size - self.generative_vocab_size
+            buff = scaled_p_vocab.new_full(size, EPSILON)
+            scaled_p_vocab = torch.cat([scaled_p_vocab, buff], dim=buff.dim()-1)
+
+        # p_context_ptr
+        scaled_p_vocab.scatter_add_(scaled_p_vocab.dim()-1, context_question_indices.unsqueeze(1).expand_as(context_question_attention), 
+            (1 - vocab_pointer_switches).expand_as(context_question_attention) * context_question_attention)
+
+        return scaled_p_vocab
 
 class DualPtrRNNDecoder(nn.Module):
 
@@ -644,7 +647,7 @@ class DualPtrRNNDecoder(nn.Module):
         context_question_alignment = context_question_alignment if context_question_alignment is not None else self.make_init_output(context_question)
 
         # context_outputs, vocab_pointer_switches, context_question_switches, context_attentions, question_attentions, context_alignments, question_alignments = [], [], [], [], [], [], []
-        context_quesstion_outputs, vocab_pointer_switches, context_question_attentions, context_question_alignments = [], [], [], []
+        context_question_outputs, vocab_pointer_switches, context_question_attentions, context_question_alignments = [], [], [], []
         for emb_t in input.split(1, dim=1):
             emb_t = emb_t.squeeze(1)
             # context_output = self.dropout(context_output)

@@ -34,7 +34,7 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 
 import tokenization
-from modeling import BertConfig, BertForQuestionAnswering
+from modeling import BertConfig, BertForQuestionAnswering, BertWithMultiPointer
 from optimization import BERTAdam
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
@@ -142,9 +142,11 @@ def read_squad_examples(input_file, is_training):
                 end_position = None
                 orig_answer_text = None
                 if is_training:
-                    if len(qa["answers"]) != 1:
-                        raise ValueError(
-                            "For training, each question should have exactly 1 answer.")
+                    # if len(qa["answers"]) != 1:
+                        # raise ValueError(
+                        #     "For training, each question should have exactly 1 answer.")
+                    if len(qa['answers']) == 0:
+                        continue
                     answer = qa["answers"][0]
                     orig_answer_text = answer["text"]
                     answer_offset = answer["answer_start"]
@@ -292,7 +294,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 answer_ids = tokenizer.convert_tokens_to_ids(answer_tokens)
                 answer_ids = answer_ids[:16]                   # Suppose the answer's max_length is 15.      
                 answer_mask = [1] * len(answer_ids)
-                while len(answer_ids) < 15:
+                while len(answer_ids) < 16:
                     answer_ids.append(0)
                     answer_mask.append(0)
 
@@ -709,6 +711,15 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         param_opti.grad.data.copy_(param_model.grad.data)
     return is_nan
 
+def save_features(features, path):
+    with open(path + '/train_features.json', 'w') as fp:
+        json.dump(features, fp)
+
+def load_features(path):
+    with open(path + '/train_features.json', 'r') as fp:
+        features = json.load(fp)
+    return features
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -853,7 +864,8 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForQuestionAnswering(bert_config)
+    # model = BertForQuestionAnswering(bert_config)
+    model = BertWithMultiPointer(bert_config)
     if args.init_checkpoint is not None:
         model.bert.load_state_dict(torch.load(args.init_checkpoint, map_location='cpu'))
     if args.fp16:
@@ -893,6 +905,11 @@ def main():
             doc_stride=args.doc_stride,
             max_query_length=args.max_query_length,
             is_training=True)
+
+        # save_path = '/raid/ltj/MRC/SQuAD/'
+        # save_features(train_features, save_path)
+        # train_features = load_features(save_path)
+
         logger.info("***** Running training *****")
         logger.info("  Num orig examples = %d", len(train_examples))
         logger.info("  Num split examples = %d", len(train_features))
@@ -920,7 +937,9 @@ def main():
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
                 # input_ids, input_mask, segment_ids, start_positions, end_positions = batch
                 input_ids, input_mask, segment_ids, start_positions, end_positions, answer_ids, answer_mask = batch
-                loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions, answer_ids, answer_mask)
+                loss, _ = model(input_ids, segment_ids, input_mask, start_positions, end_positions, answer_ids, answer_mask)
+                if step % 1000 == 0:
+                    print('Loss is :', loss.mean())
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.fp16 and args.loss_scale != 1.0:
