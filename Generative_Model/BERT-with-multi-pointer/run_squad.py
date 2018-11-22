@@ -34,6 +34,7 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 
 import tokenization
+from tokenization import load_idx_to_token
 from modeling import BertConfig, BertForQuestionAnswering, BertWithMultiPointer
 from optimization import BERTAdam
 
@@ -275,6 +276,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
 
             start_position = None
             end_position = None
+            answer_ids = None
+            answer_mask = None
             if is_training:
                 # For training, if our document chunk does not contain an annotation
                 # we throw it out, since there is nothing to predict.
@@ -291,10 +294,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 # get the answer tokens and ids for multi pointer network.
                 answer_tokens = tokens[start_position:(end_position + 1)]
                 answer_tokens.insert(0, "[SEP]")
+                answer_tokens = answer_tokens[:16]                   # Suppose the answer's max_length is 15, and 2 special symbols.
+                answer_tokens.append("[CLS]")
                 answer_ids = tokenizer.convert_tokens_to_ids(answer_tokens)
-                answer_ids = answer_ids[:16]                   # Suppose the answer's max_length is 15.      
-                answer_mask = [1] * len(answer_ids)
-                while len(answer_ids) < 16:
+                answer_mask = [1] * (len(answer_ids) - 1)
+                answer_mask.append(0)
+                while len(answer_ids) < 17:
                     answer_ids.append(0)
                     answer_mask.append(0)
 
@@ -711,14 +716,27 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         param_opti.grad.data.copy_(param_model.grad.data)
     return is_nan
 
-def save_features(features, path):
-    with open(path + '/train_features.json', 'w') as fp:
-        json.dump(features, fp)
+# def decode_to_vocab(batch):
+#     with torch.cuda.device_of(batch):
+#         batch = batch.tolist()
+#     batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch]
+    
+#     def trim(s, t):
+#         sentence = []
+#         for w in s:
+#             if w == t:
+#                 break
+#             sentence.append(w)
+#             return sentence
 
-def load_features(path):
-    with open(path + '/train_features.json', 'r') as fp:
-        features = json.load(fp)
-    return features
+#     batch = [trim(ex, '[CLS]') for ex in batch]
+
+#     def filter_special(tok):
+#         return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
+
+#     batch = [filter(filter_special, ex) for ex in batch]
+
+#     return [''.join(ex) for ex in batch]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -854,6 +872,7 @@ def main():
 
     tokenizer = tokenization.FullTokenizer(
         vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
+    idx_to_vocab = load_idx_to_token(args.vocab_file)
 
     train_examples = None
     num_train_steps = None
@@ -1004,22 +1023,60 @@ def main():
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
+        #     with torch.no_grad():
+        #         batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
+        #     for i, example_index in enumerate(example_indices):
+        #         start_logits = batch_start_logits[i].detach().cpu().tolist()
+        #         end_logits = batch_end_logits[i].detach().cpu().tolist()
+        #         eval_feature = eval_features[example_index.item()]
+        #         unique_id = int(eval_feature.unique_id)
+        #         all_results.append(RawResult(unique_id=unique_id,
+        #                                      start_logits=start_logits,
+        #                                      end_logits=end_logits))
+        # output_prediction_file = os.path.join(args.output_dir, "predictions.json")
+        # output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
+        # write_predictions(eval_examples, eval_features, all_results,
+        #                   args.n_best_size, args.max_answer_length,
+        #                   args.do_lower_case, output_prediction_file,
+        #                   output_nbest_file, args.verbose_logging)
             with torch.no_grad():
-                batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
-            for i, example_index in enumerate(example_indices):
-                start_logits = batch_start_logits[i].detach().cpu().tolist()
-                end_logits = batch_end_logits[i].detach().cpu().tolist()
-                eval_feature = eval_features[example_index.item()]
-                unique_id = int(eval_feature.unique_id)
-                all_results.append(RawResult(unique_id=unique_id,
-                                             start_logits=start_logits,
-                                             end_logits=end_logits))
-        output_prediction_file = os.path.join(args.output_dir, "predictions.json")
-        output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
-        write_predictions(eval_examples, eval_features, all_results,
-                          args.n_best_size, args.max_answer_length,
-                          args.do_lower_case, output_prediction_file,
-                          output_nbest_file, args.verbose_logging)
+
+                def decode_to_vocab(batch, isContext=False):
+                    with torch.cuda.device_of(batch):
+                        batch = batch.tolist()
+                    batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch]
+                    
+                    def trim(s, t):
+                        sentence = []
+                        for w in s:
+                            if w == t:
+                                break
+                            sentence.append(w)
+                        return sentence
+
+                    if isContext:
+                        batch = [trim(ex, '[PAD]') for ex in batch]
+                    else:
+                        batch = [trim(ex, '[CLS]') for ex in batch]
+
+                    def filter_special(tok):
+                        return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
+
+                    batch = [filter(filter_special, ex) for ex in batch]
+
+                    return [' '.join(ex) if ex != None else '' for ex in batch]
+
+                loss, outs = model(input_ids, segment_ids, input_mask)
+                # print('input id is:\n', input_ids)
+                # print('outs is:\n', outs)
+                # exit(0)
+                decode_answers = decode_to_vocab(outs)
+                decode_contexts = decode_to_vocab(input_ids, isContext=True)
+                for i, (context, answer) in enumerate(zip(decode_contexts, decode_answers)):
+                    print('context is:\n', context)
+                    print('answer is:\n', answer)
+                    if i == 10:
+                        exit(0)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from six import string_types
-from common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask, TransformerDecoder
+from common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask, TransformerDecoder, positional_encodings_like
+# from tokenization import load_idx_to_token
 
 PAD_INDEX = 0
 
@@ -529,15 +530,18 @@ class BertWithMultiPointer(nn.Module):
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size, config.hidden_size,
                                                       dropout=0.2, num_layers=1)
         self.vocab_size = config.vocab_size
+        # self.idx_to_vocab = load_idx_to_token(config.vocab_file)
         self.out = nn.Linear(config.hidden_size, self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
         sequence_output = all_encoder_layers[-1]
+        
+        context_padding = attention_mask.data == 0
+        answer_padding = answer_mask == 0
+        self.dual_ptr_rnn_decoder.applyMasks(context_padding)
+        
         if self.training:
-            context_padding = attention_mask.data == 0
-            answer_padding = answer_mask == 0
-            self.dual_ptr_rnn_decoder.applyMasks(context_padding)
             answer_embedding = self.decoderEmbedding(answer_ids)
             # print('answer_embedding size is: ', answer_embedding.size())
             # print('sequence_output is: ', sequence_output.size())
@@ -552,9 +556,10 @@ class BertWithMultiPointer(nn.Module):
             loss = F.nll_loss(probs.log(), targets)
             return loss, None
         else:
-            return None, self.greedy(sequence_output, final_context, input_ids).data
+            # self.dual_ptr_rnn_decoder.applyMasks(context_padding)
+            return None, self.greedy(all_encoder_layers[-2:], sequence_output, input_ids).data
 
-    def greedy(self, self_attended_context, context, question, context_indices, question_indices, oov_to_limited_idx, rnn_state=None):
+    def greedy(self, self_attended_context, context, context_indices, oov_to_limited_idx=None, rnn_state=None):
         B, TC, C = context.size()
         # T = self.args.max_output_length
         T = 15 # suppose the max length of answer is 15
@@ -568,30 +573,27 @@ class BertWithMultiPointer(nn.Module):
         rnn_output, context_question_alignment = None, None
         for t in range(T):
             if t == 0:
-                embedding = self.decoder_embeddings(
-                    self_attended_context[-1].new_full((B, 1), "SEP", dtype=torch.long))
+                embedding = self.decoderEmbedding(
+                    self_attended_context[-1].new_full((B, 1), 102, dtype=torch.long)) # the index of "[SEP]" is 102 
             else:
-                embedding = self.decoder_embeddings(outs[:, t - 1].unsqueeze(1))
-            # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1)
+                embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
+            # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t + 1], hiddens[l][:, :t + 1])
                   , self_attended_context[l], self_attended_context[l]))
-            decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1),
-                context, question, 
-                context_alignment=context_alignment, question_alignment=question_alignment,
-                hidden=rnn_state, output=rnn_output)
-            rnn_output, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switch, context_question_switch, rnn_state = decoder_outputs
-            probs = self.probs(self.out, rnn_output, vocab_pointer_switch, context_question_switch, 
-                context_attention, question_attention, 
-                context_indices, question_indices, 
-                oov_to_limited_idx)
+            decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context[-1])
+            # rnn_output, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switch, context_question_switch, rnn_state = decoder_outputs
+            context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
+
+            probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, context_indices)
+            
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
-            eos_yet = eos_yet | (preds == self.field.decoder_stoi['<eos>'])
-            outs[:, t] = preds.cpu().apply_(self.map_to_full)
+            eos_yet = eos_yet | (preds == 101)  # the index of "[CLS]" is 101
+            outs[:, t] = preds.cpu() # .apply_(self.map_to_full)
             if eos_yet.all():
                 break
         return outs

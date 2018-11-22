@@ -80,6 +80,19 @@ def load_vocab(vocab_file):
             index += 1
     return vocab
 
+def load_idx_to_token(vocab_file):
+    """Loads a vocabulary file into a dictionary."""
+    idx_to_token = collections.OrderedDict()
+    index = 0
+    with open(vocab_file, "r") as reader:
+        while True:
+            token = convert_to_unicode(reader.readline())
+            if not token:
+                break
+            token = token.strip()
+            idx_to_token[index] = token
+            index += 1
+    return idx_to_token
 
 def convert_tokens_to_ids(vocab, tokens):
     """Converts a sequence of tokens into ids using the vocab."""
