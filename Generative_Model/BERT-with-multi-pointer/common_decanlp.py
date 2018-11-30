@@ -142,14 +142,25 @@ class MultiHead(nn.Module):
 
     def forward(self, query, key, value, padding=None):
         query, key, value = self.wq(query), self.wk(key), self.wv(value)
-        # print('query size is:', query.size())
-        # print('key size is:', key.size())
-        # print('value size is:', value.size())
         query, key, value = (
             x.chunk(self.n_heads, -1) for x in (query, key, value))
-        # print('after chunk, query size is:', len(query), query[0].size())
-        # print('after chunk, key size is:', len(query), key[0].size())
-        # print('after chunk, value size is:', len(query), value[0].size())
+        return torch.cat([self.attention(q, k, v, padding=padding)
+                          for q, k, v in zip(query, key, value)], -1)
+
+class MultiHead_decoder(nn.Module):
+
+    def __init__(self, d_key, d_value, n_heads, dropout_ratio, causal=False):
+        super().__init__()
+        self.attention = Attention(d_key, dropout_ratio, causal=causal)
+        self.wq = Linear(d_key, d_key, bias=False)
+        self.wk = Linear(d_key, d_key, bias=False)
+        self.wv = Linear(d_value, d_value, bias=False)
+        self.n_heads = n_heads
+
+    def forward(self, query, key, value, padding=None):
+        query, key, value = self.wq(query), self.wk(key), self.wv(value)
+        query, key, value = (
+            x.chunk(self.n_heads, -1) for x in (query, key, value))
         return torch.cat([self.attention(q, k, v, padding=padding)
                           for q, k, v in zip(query, key, value)], -1)
 
@@ -220,8 +231,24 @@ class TransformerDecoderLayer(nn.Module):
         x = self.selfattn(x, x, x, padding=answer_padding)
         return self.feedforward(self.attention(x, encoding, encoding, padding=context_padding))
 
+# class TransformerDecoder(nn.Module):
 
-class TransformerDecoder(nn.Module):
+#     def __init__(self, dimension, n_heads, hidden, num_layers, dropout, causal=True):
+#         super().__init__()
+#         self.layers = nn.ModuleList(
+#             [TransformerDecoderLayer(dimension, n_heads, hidden, dropout, causal=causal) for i in range(num_layers)])
+#         self.dropout = nn.Dropout(dropout)
+#         self.d_model = dimension
+
+#     def forward(self, x, encoding, context_padding=None, positional_encodings=True, answer_padding=None):
+#         if positional_encodings:
+#             x = x + positional_encodings_like(x)
+#         x = self.dropout(x)
+#         for layer, enc in zip(self.layers, encoding[1:]):
+#             x = layer(x, enc, context_padding=context_padding, answer_padding=answer_padding)
+#         return x
+
+class TransformerDecoder(nn.Module): #only use the top layer's info of encoder.
 
     def __init__(self, dimension, n_heads, hidden, num_layers, dropout, causal=True):
         super().__init__()
@@ -234,8 +261,8 @@ class TransformerDecoder(nn.Module):
         if positional_encodings:
             x = x + positional_encodings_like(x)
         x = self.dropout(x)
-        for layer, enc in zip(self.layers, encoding[1:]):
-            x = layer(x, enc, context_padding=context_padding, answer_padding=answer_padding)
+        for layer in self.layers:
+            x = layer(x, encoding, context_padding=context_padding, answer_padding=answer_padding)
         return x
 
 

@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from six import string_types
-from common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask, TransformerDecoder, positional_encodings_like
+from common_decanlp import LSTMDecoderAttention, LSTMDecoder, Feedforward, mask, TransformerDecoder, positional_encodings_like, LayerNorm
 # from tokenization import load_idx_to_token
 
 PAD_INDEX = 0
@@ -527,16 +527,22 @@ class BertWithMultiPointer(nn.Module):
         self.apply(init_weights)
         
         # self.self_attentive_decoder = TransformerDecoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
-        self.self_attentive_decoder = TransformerDecoder(config.hidden_size, 12, 3072, 3, 0.2)
-        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size, config.hidden_size,
+        self.linear_answer = nn.Linear(config.hidden_size, config.hidden_size/2)
+        self.linear_context = nn.Linear(config.hidden_size, config.hidden_size/2)
+        self.ln_answer = LayerNorm(config.hidden_size/2)
+        self.ln_context = LayerNorm(config.hidden_size/2)
+
+        self.self_attentive_decoder = TransformerDecoder(config.hidden_size/2, 6, 1536, 3, 0.2)
+        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size/2, config.hidden_size/2,
                                                       dropout=0.2, num_layers=1)
         self.vocab_size = config.vocab_size
         # self.idx_to_vocab = load_idx_to_token(config.vocab_file)
-        self.out = nn.Linear(config.hidden_size, self.vocab_size)
+        self.out = nn.Linear(config.hidden_size/2, self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
         sequence_output = all_encoder_layers[-1]
+        sequence_output = self.ln_context(self.linear_context(sequence_output))
         
         context_padding = attention_mask.data == 0
         answer_padding = answer_mask == 0
@@ -544,9 +550,10 @@ class BertWithMultiPointer(nn.Module):
         
         if self.training:
             answer_embedding = self.decoderEmbedding(answer_ids)
+            answer_embedding = self.ln_answer(self.linear_answer(answer_embedding))
             # print('answer_embedding size is: ', answer_embedding.size())
             # print('sequence_output is: ', sequence_output.size())
-            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), all_encoder_layers[-3:], context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
+            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
@@ -558,24 +565,24 @@ class BertWithMultiPointer(nn.Module):
             return loss, None
         else:
             # self.dual_ptr_rnn_decoder.applyMasks(context_padding)
-            return None, self.greedy(all_encoder_layers[-2:], sequence_output, input_ids).data
+            return None, self.greedy(sequence_output, input_ids).data
 
-    def greedy(self, self_attended_context, context, context_indices, oov_to_limited_idx=None, rnn_state=None):
-        B, TC, C = context.size()
+    def greedy(self, self_attended_context, context_indices, oov_to_limited_idx=None, rnn_state=None):
+        B, TC, C = self_attended_context.size()
         # T = self.args.max_output_length
         T = 15 # suppose the max length of answer is 15
         # outs = context.new_full((B, T), self.field.decoder_stoi['<pad>'], dtype=torch.long)
-        outs = context.new_full((B, T), 0, dtype=torch.long)
-        hiddens = [self_attended_context[0].new_zeros((B, T, C))
+        outs = self_attended_context.new_full((B, T), 0, dtype=torch.long)
+        hiddens = [self_attended_context.new_zeros((B, T, C))
                    for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] + positional_encodings_like(hiddens[0])
-        eos_yet = context.new_zeros((B, )).byte()
+        eos_yet = self_attended_context.new_zeros((B, )).byte()
     
         rnn_output, context_question_alignment = None, None
         for t in range(T):
             if t == 0:
                 embedding = self.decoderEmbedding(
-                    self_attended_context[-1].new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 102 
+                    self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 102 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
@@ -584,8 +591,8 @@ class BertWithMultiPointer(nn.Module):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t + 1], hiddens[l][:, :t + 1])
-                  , self_attended_context[l], self_attended_context[l]))
-            decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context[-1])
+                  , self_attended_context, self_attended_context))
+            decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
             # rnn_output, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switch, context_question_switch, rnn_state = decoder_outputs
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
 
