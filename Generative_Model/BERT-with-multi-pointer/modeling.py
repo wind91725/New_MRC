@@ -512,7 +512,8 @@ class BertWithMultiPointer(nn.Module):
         # TODO check with Google if it's normal there is no dropout on the token classifier of SQuAD in the TF version
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.qa_outputs = nn.Linear(config.hidden_size, 2)
-        self.decoderEmbedding = BERTEmbeddings(config)
+        self.decoderEmbedding = copy.deepcopy(BERTEmbeddings(config))
+        # self.decoderEmbedding = BERTEmbeddings(config)
         def init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 # Slightly different from the TF version which uses truncated_normal for initialization
@@ -526,7 +527,7 @@ class BertWithMultiPointer(nn.Module):
         self.apply(init_weights)
         
         # self.self_attentive_decoder = TransformerDecoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
-        self.self_attentive_decoder = TransformerDecoder(config.hidden_size, 3, 150, 2, 0.2)
+        self.self_attentive_decoder = TransformerDecoder(config.hidden_size, 12, 3072, 3, 0.2)
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size, config.hidden_size,
                                                       dropout=0.2, num_layers=1)
         self.vocab_size = config.vocab_size
@@ -545,7 +546,7 @@ class BertWithMultiPointer(nn.Module):
             answer_embedding = self.decoderEmbedding(answer_ids)
             # print('answer_embedding size is: ', answer_embedding.size())
             # print('sequence_output is: ', sequence_output.size())
-            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), all_encoder_layers[-2:], context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
+            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), all_encoder_layers[-3:], context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
@@ -574,7 +575,7 @@ class BertWithMultiPointer(nn.Module):
         for t in range(T):
             if t == 0:
                 embedding = self.decoderEmbedding(
-                    self_attended_context[-1].new_full((B, 1), 102, dtype=torch.long)) # the index of "[SEP]" is 102 
+                    self_attended_context[-1].new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 102 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
@@ -628,16 +629,16 @@ class DualPtrRNNDecoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = nn.Dropout(dropout)
 
-        self.input_feed = True
-        if self.input_feed:
-            d_in += 1 * d_hid
+        # self.input_feed = True
+        # if self.input_feed:
+        #     d_in += 1 * d_hid
 
-        self.rnn = LSTMDecoder(self.num_layers, d_in, d_hid, dropout)
+        # self.rnn = LSTMDecoder(self.num_layers, d_in, d_hid, dropout)
         # self.context_attn = LSTMDecoderAttention(d_hid, dot=True)
         # self.question_attn = LSTMDecoderAttention(d_hid, dot=True)
         self.context_question_attn = LSTMDecoderAttention(d_hid, dot=True)
 
-        self.vocab_pointer_switch = nn.Sequential(Feedforward(2 * self.d_hid + d_in, 1), nn.Sigmoid())
+        self.vocab_pointer_switch = nn.Sequential(Feedforward(self.d_hid + d_in, 1), nn.Sigmoid())
         # self.context_question_switch = nn.Sequential(Feedforward(2 * self.d_hid + d_in, 1), nn.Sigmoid())
 
     # def forward(self, input, context, question, output=None, hidden=None, context_alignment=None, question_alignment=None):
@@ -654,13 +655,11 @@ class DualPtrRNNDecoder(nn.Module):
             emb_t = emb_t.squeeze(1)
             # context_output = self.dropout(context_output)
             context_quesstion_output = self.dropout(context_quesstion_output)
-            if self.input_feed:
-                emb_t = torch.cat([emb_t, context_quesstion_output], 1)
-            dec_state, hidden = self.rnn(emb_t, hidden)
-            # context_output, context_attention, context_alignment = self.context_attn(dec_state, context)
-            # question_output, question_attention, question_alignment = self.question_attn(dec_state, question)
-            context_question_output, context_question_attention, context_question_alignment = self.context_question_attn(dec_state, context_question)            
-            vocab_pointer_switch = self.vocab_pointer_switch(torch.cat([dec_state, context_question_output, emb_t], -1))
+            # if self.input_feed:
+            #     emb_t = torch.cat([emb_t, context_quesstion_output], 1)
+            # dec_state, hidden = self.rnn(emb_t, hidden)
+            context_question_output, context_question_attention, context_question_alignment = self.context_question_attn(emb_t, context_question)            
+            vocab_pointer_switch = self.vocab_pointer_switch(torch.cat([emb_t, context_question_output], -1))
             # context_question_switch = self.context_question_switch(torch.cat([dec_state, question_output, emb_t], -1))
             context_question_output = self.dropout(context_question_output)
             context_question_outputs.append(context_question_output)

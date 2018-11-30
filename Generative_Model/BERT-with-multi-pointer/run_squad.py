@@ -293,9 +293,9 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 end_position = tok_end_position - doc_start + doc_offset
                 # get the answer tokens and ids for multi pointer network.
                 answer_tokens = tokens[start_position:(end_position + 1)]
-                answer_tokens.insert(0, "[SEP]")
+                answer_tokens.insert(0, "[CLS]")
                 answer_tokens = answer_tokens[:16]                   # Suppose the answer's max_length is 15, and 2 special symbols.
-                answer_tokens.append("[CLS]")
+                answer_tokens.append("[SEP]")
                 answer_ids = tokenizer.convert_tokens_to_ids(answer_tokens)
                 answer_mask = [1] * (len(answer_ids) - 1)
                 answer_mask.append(0)
@@ -303,29 +303,29 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     answer_ids.append(0)
                     answer_mask.append(0)
 
-            if example_index < 20:
-                logger.info("*** Example ***")
-                logger.info("unique_id: %s" % (unique_id))
-                logger.info("example_index: %s" % (example_index))
-                logger.info("doc_span_index: %s" % (doc_span_index))
-                logger.info("tokens: %s" % " ".join(
-                    [tokenization.printable_text(x) for x in tokens]))
-                logger.info("token_to_orig_map: %s" % " ".join(
-                    ["%d:%d" % (x, y) for (x, y) in six.iteritems(token_to_orig_map)]))
-                logger.info("token_is_max_context: %s" % " ".join([
-                    "%d:%s" % (x, y) for (x, y) in six.iteritems(token_is_max_context)
-                ]))
-                logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-                logger.info(
-                    "input_mask: %s" % " ".join([str(x) for x in input_mask]))
-                logger.info(
-                    "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-                if is_training:
-                    answer_text = " ".join(tokens[start_position:(end_position + 1)])
-                    logger.info("start_position: %d" % (start_position))
-                    logger.info("end_position: %d" % (end_position))
-                    logger.info(
-                        "answer: %s" % (tokenization.printable_text(answer_text)))
+            # if example_index < 20:
+            #     logger.info("*** Example ***")
+            #     logger.info("unique_id: %s" % (unique_id))
+            #     logger.info("example_index: %s" % (example_index))
+            #     logger.info("doc_span_index: %s" % (doc_span_index))
+            #     logger.info("tokens: %s" % " ".join(
+            #         [tokenization.printable_text(x) for x in tokens]))
+            #     logger.info("token_to_orig_map: %s" % " ".join(
+            #         ["%d:%d" % (x, y) for (x, y) in six.iteritems(token_to_orig_map)]))
+            #     logger.info("token_is_max_context: %s" % " ".join([
+            #         "%d:%s" % (x, y) for (x, y) in six.iteritems(token_is_max_context)
+            #     ]))
+            #     logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+            #     logger.info(
+            #         "input_mask: %s" % " ".join([str(x) for x in input_mask]))
+            #     logger.info(
+            #         "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+            #     if is_training:
+            #         answer_text = " ".join(tokens[start_position:(end_position + 1)])
+            #         logger.info("start_position: %d" % (start_position))
+            #         logger.info("end_position: %d" % (end_position))
+            #         logger.info(
+            #             "answer: %s" % (tokenization.printable_text(answer_text)))
 
             features.append(
                 InputFeatures(
@@ -738,6 +738,33 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
 
 #     return [''.join(ex) for ex in batch]
 
+# eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask
+
+def eval_the_model(args, model, eval_data):
+    if args.local_rank == -1:
+        eval_sampler = RandomSampler(eval_data)
+    else:
+        eval_sampler = DistributedSampler(eval_data)
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
+
+    eval_loss = 0
+    eval_batch = 0
+    n_gpu = torch.cuda.device_count()
+
+    for step, batch in enumerate(tqdm(eval_dataloader, desc="Iteration")):
+        if n_gpu == 1:
+            batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
+        # input_ids, input_mask, segment_ids, start_positions, end_positions = batch
+        input_ids, input_mask, segment_ids, eval_example_index, answer_ids, answer_mask = batch
+        loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        
+        eval_loss += loss.mean().detach().cpu()
+        eval_batch += 1
+    eval_loss /= eval_batch
+    return eval_loss, math.pow(math.e, eval_loss)
+
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -771,7 +798,8 @@ def main():
     parser.add_argument("--do_predict", default=False, action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
     parser.add_argument("--predict_batch_size", default=8, type=int, help="Total batch size for predictions.")
-    parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
+    parser.add_argument("--encoder_learning_rate", default=5e-5, type=float, help="The initial learning rate for Bert encoder.")
+    parser.add_argument("--decoder_learning_rate", default=5e-3, type=float, help="The initial learning rate for generative decoder.")
     parser.add_argument("--num_train_epochs", default=3.0, type=float,
                         help="Total number of training epochs to perform.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float,
@@ -866,8 +894,8 @@ def main():
             "was only trained up to sequence length %d" %
             (args.max_seq_length, bert_config.max_position_embeddings))
 
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
-        raise ValueError("Output directory () already exists and is not empty.")
+    # if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+    #     raise ValueError("Output directory () already exists and is not empty.")
     os.makedirs(args.output_dir, exist_ok=True)
 
     tokenizer = tokenization.FullTokenizer(
@@ -881,6 +909,47 @@ def main():
             input_file=args.train_file, is_training=True)
         num_train_steps = int(
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+
+        train_features = convert_examples_to_features(
+            examples=train_examples,
+            tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
+            doc_stride=args.doc_stride,
+            max_query_length=args.max_query_length,
+            is_training=True)
+
+        # logger.info("***** Running training *****")
+        # logger.info("  Num orig examples = %d", len(train_examples))
+        # logger.info("  Num split examples = %d", len(train_features))
+        # logger.info("  Batch size = %d", args.train_batch_size)
+        # logger.info("  Num steps = %d", num_train_steps)
+        train_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
+        train_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
+        train_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
+        train_start_positions = torch.tensor([f.start_position for f in train_features], dtype=torch.long)
+        train_end_positions = torch.tensor([f.end_position for f in train_features], dtype=torch.long)
+        train_answer_ids = torch.tensor([f.answer_ids for f in train_features], dtype=torch.long)
+        train_answer_mask = torch.tensor([f.answer_mask for f in train_features], dtype=torch.long)
+        train_data = TensorDataset(train_input_ids, train_input_mask, train_segment_ids,
+                           train_start_positions, train_end_positions, train_answer_ids, train_answer_mask)
+
+    eval_examples = read_squad_examples(
+        input_file=args.predict_file, is_training=True)
+    eval_features = convert_examples_to_features(
+        examples=eval_examples,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_seq_length,
+        doc_stride=args.doc_stride,
+        max_query_length=args.max_query_length,
+        is_training=True)
+
+    eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+    eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
+    eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
+    eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
+    eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
 
     # Prepare model
     # model = BertForQuestionAnswering(bert_config)
@@ -905,60 +974,48 @@ def main():
                             for n, param in model.named_parameters()]
     else:
         param_optimizer = list(model.named_parameters())
+    # print('param_optimizer is:\n', [n for n, p in param_optimizer])
+    # exit(0)
     no_decay = ['bias', 'gamma', 'beta']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if n not in no_decay], 'weight_decay_rate': 0.01},
-        {'params': [p for n, p in param_optimizer if n in no_decay], 'weight_decay_rate': 0.0}
+        {'params': [p for n, p in param_optimizer if n not in no_decay and 'bert' in n], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if n not in no_decay and 'bert' not in n], 'weight_decay_rate': 0.01, 'lr': args.decoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if n in no_decay and 'bert' in n], 'weight_decay_rate': 0.0, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if n in no_decay and 'bert' not in n], 'weight_decay_rate': 0.0, 'lr': args.decoder_learning_rate},
+        # {'params': [p for n, p in param_optimizer if 'bert' in n], 'lr': args.encoder_learning_rate},
+        # {'params': [p for n, p in param_optimizer if 'bert' not in n], 'lr': args.decoder_learning_rate}
         ]
     optimizer = BERTAdam(optimizer_grouped_parameters,
-                         lr=args.learning_rate,
+                         lr=args.encoder_learning_rate,
                          warmup=args.warmup_proportion,
                          t_total=num_train_steps)
 
+    eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
+    with open(args.output_dir+'/log.txt', 'w') as f:
+        f.write('Before train, the average loss on val set is: ' + str(eval_loss.float()) + ' and the average ppl on val set is: ' + str(eval_ppl))
+        f.write('\n\n')
+
     global_step = 0
     if args.do_train:
-        train_features = convert_examples_to_features(
-            examples=train_examples,
-            tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            doc_stride=args.doc_stride,
-            max_query_length=args.max_query_length,
-            is_training=True)
+        
+        model.train()
 
-        # save_path = '/raid/ltj/MRC/SQuAD/'
-        # save_features(train_features, save_path)
-        # train_features = load_features(save_path)
-
-        logger.info("***** Running training *****")
-        logger.info("  Num orig examples = %d", len(train_examples))
-        logger.info("  Num split examples = %d", len(train_features))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_steps)
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-        all_start_positions = torch.tensor([f.start_position for f in train_features], dtype=torch.long)
-        all_end_positions = torch.tensor([f.end_position for f in train_features], dtype=torch.long)
-        all_answer_ids = torch.tensor([f.answer_ids for f in train_features], dtype=torch.long)
-        all_answer_mask = torch.tensor([f.answer_mask for f in train_features], dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                                   all_start_positions, all_end_positions, all_answer_ids, all_answer_mask)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
             train_sampler = DistributedSampler(train_data)
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
-        model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
+            train_loss = 0
+            train_batch = 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
                 # input_ids, input_mask, segment_ids, start_positions, end_positions = batch
                 input_ids, input_mask, segment_ids, start_positions, end_positions, answer_ids, answer_mask = batch
                 loss, _ = model(input_ids, segment_ids, input_mask, start_positions, end_positions, answer_ids, answer_mask)
-                if step % 1000 == 0:
-                    print('Loss is :', loss.mean())
+
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.fp16 and args.loss_scale != 1.0:
@@ -987,27 +1044,21 @@ def main():
                     model.zero_grad()
                     global_step += 1
 
+                train_loss += loss.detach().cpu()
+                train_batch += 1
+
+            train_loss /= train_batch
+            train_ppl = math.pow(math.e, train_loss)
+            eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
+            with open(args.output_dir+'/log.txt', 'a') as f:
+                f.write('In epoch-' + str(epoch) + ' the average loss on train set is: ' + str(train_loss.float()) + ' the average ppl on train set is: ' + str(train_ppl))
+                f.write('\n')
+                f.write('In epoch-' + str(epoch) + ' the average loss on eval set is: ' + str(eval_loss.float()) + ' the average ppl on eval set is: ' + str(eval_ppl))
+                f.write('\n')
+            
+ 
     if args.do_predict:
-        eval_examples = read_squad_examples(
-            input_file=args.predict_file, is_training=False)
-        eval_features = convert_examples_to_features(
-            examples=eval_examples,
-            tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            doc_stride=args.doc_stride,
-            max_query_length=args.max_query_length,
-            is_training=False)
 
-        logger.info("***** Running predictions *****")
-        logger.info("  Num orig examples = %d", len(eval_examples))
-        logger.info("  Num split examples = %d", len(eval_features))
-        logger.info("  Batch size = %d", args.predict_batch_size)
-
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
         if args.local_rank == -1:
             eval_sampler = SequentialSampler(eval_data)
         else:
@@ -1017,7 +1068,7 @@ def main():
         model.eval()
         all_results = []
         logger.info("Start evaluating")
-        for input_ids, input_mask, segment_ids, example_indices in tqdm(eval_dataloader, desc="Evaluating"):
+        for input_ids, input_mask, segment_ids, example_indices, answer_ids, answer_mask in tqdm(eval_dataloader, desc="Evaluating"):
             if len(all_results) % 1000 == 0:
                 logger.info("Processing example: %d" % (len(all_results)))
             input_ids = input_ids.to(device)
@@ -1070,13 +1121,16 @@ def main():
                 # print('input id is:\n', input_ids)
                 # print('outs is:\n', outs)
                 # exit(0)
+                ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
                 decode_contexts = decode_to_vocab(input_ids, isContext=True)
-                for i, (context, answer) in enumerate(zip(decode_contexts, decode_answers)):
+
+                for i, (context, answer, ground_trurh) in enumerate(zip(decode_contexts, decode_answers, ground_trurhs)):
                     print('context is:\n', context)
+                    print('ground truth is:\n', ground_trurh)
                     print('answer is:\n', answer)
-                    if i == 10:
-                        exit(0)
+                    if i == 1:
+                        break
 
 
 if __name__ == "__main__":
