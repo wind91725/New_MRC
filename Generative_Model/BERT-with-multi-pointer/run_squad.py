@@ -1105,10 +1105,10 @@ def main():
                             sentence.append(w)
                         return sentence
 
-                    if isContext:
-                        batch = [trim(ex, '[PAD]') for ex in batch]
-                    else:
-                        batch = [trim(ex, '[CLS]') for ex in batch]
+                    # if isContext:
+                    batch = [trim(ex, '[PAD]') for ex in batch]
+                    # else:
+                    #     batch = [trim(ex, '[CLS]') for ex in batch]
 
                     def filter_special(tok):
                         return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']

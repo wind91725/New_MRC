@@ -527,17 +527,17 @@ class BertWithMultiPointer(nn.Module):
         self.apply(init_weights)
         
         # self.self_attentive_decoder = TransformerDecoder(args.dimension, args.transformer_heads, args.transformer_hidden, args.transformer_layers, args.dropout_ratio)
-        self.linear_answer = nn.Linear(config.hidden_size, config.hidden_size/2)
-        self.linear_context = nn.Linear(config.hidden_size, config.hidden_size/2)
-        self.ln_answer = LayerNorm(config.hidden_size/2)
-        self.ln_context = LayerNorm(config.hidden_size/2)
+        self.linear_answer = nn.Linear(config.hidden_size, int(config.hidden_size/2))
+        self.linear_context = nn.Linear(config.hidden_size, int(config.hidden_size/2))
+        self.ln_answer = LayerNorm(int(config.hidden_size/2))
+        self.ln_context = LayerNorm(int(config.hidden_size/2))
 
-        self.self_attentive_decoder = TransformerDecoder(config.hidden_size/2, 6, 1536, 3, 0.2)
-        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(config.hidden_size/2, config.hidden_size/2,
+        self.self_attentive_decoder = TransformerDecoder(int(config.hidden_size/2), 6, 1536, 3, 0.2)
+        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(int(config.hidden_size/2), int(config.hidden_size/2),
                                                       dropout=0.2, num_layers=1)
         self.vocab_size = config.vocab_size
         # self.idx_to_vocab = load_idx_to_token(config.vocab_file)
-        self.out = nn.Linear(config.hidden_size/2, self.vocab_size)
+        self.out = nn.Linear(int(config.hidden_size/2), self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
@@ -573,19 +573,19 @@ class BertWithMultiPointer(nn.Module):
         T = 15 # suppose the max length of answer is 15
         # outs = context.new_full((B, T), self.field.decoder_stoi['<pad>'], dtype=torch.long)
         outs = self_attended_context.new_full((B, T), 0, dtype=torch.long)
-        hiddens = [self_attended_context.new_zeros((B, T, C))
-                   for l in range(len(self.self_attentive_decoder.layers) + 1)]
+        hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] + positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
     
-        rnn_output, context_question_alignment = None, None
+        # rnn_output, context_question_alignment = None, None
         for t in range(T):
             if t == 0:
                 embedding = self.decoderEmbedding(
-                    self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 102 
+                    self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
+            embedding = self.ln_answer(self.linear_answer(embedding))
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
@@ -600,7 +600,7 @@ class BertWithMultiPointer(nn.Module):
             
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
-            eos_yet = eos_yet | (preds == 101)  # the index of "[CLS]" is 101
+            eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
             outs[:, t] = preds.cpu() # .apply_(self.map_to_full)
             if eos_yet.all():
                 break
@@ -678,10 +678,10 @@ class DualPtrRNNDecoder(nn.Module):
             # question_alignments.append(question_alignment)
 
         # context_outputs, vocab_pointer_switches, context_question_switches, context_attention, question_attention = [self.package_outputs(x) for x in [context_outputs, vocab_pointer_switches, context_question_switches, context_attentions, question_attentions]]
-        context_question_outputs, vocab_pointer_switches, context_question_attention = [self.package_outputs(x) for x in [context_question_outputs, vocab_pointer_switches, context_question_attentions]]
+        context_question_outputs, vocab_pointer_switches, context_question_attentions = [self.package_outputs(x) for x in [context_question_outputs, vocab_pointer_switches, context_question_attentions]]
         
         # return context_outputs, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switches, context_question_switches, hidden
-        return context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden
+        return context_question_outputs, context_question_attentions, context_question_alignments, vocab_pointer_switches, hidden
 
 
     # def applyMasks(self, context_mask, question_mask):
