@@ -569,21 +569,18 @@ class BertWithMultiPointer(nn.Module):
 
     def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None):
         B, TC, C = self_attended_context.size()
-        # T = self.args.max_output_length
         T = 15 # suppose the max length of answer is 15
-        # outs = context.new_full((B, T), self.field.decoder_stoi['<pad>'], dtype=torch.long)
         outs = self_attended_context.new_full((B, T), 0, dtype=torch.long)
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] + positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
     
-        # rnn_output, context_question_alignment = None, None
         for t in range(T):
             if t == 0:
-                embedding = self.decoderEmbedding(
-                    self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
+                embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
+            print('at step-'+str(t)+', the embedding is:\n', embedding)
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.half_dim else embedding
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
@@ -593,16 +590,14 @@ class BertWithMultiPointer(nn.Module):
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t + 1], hiddens[l][:, :t + 1])
                   , self_attended_context, self_attended_context))
             decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
-            # rnn_output, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switch, context_question_switch, rnn_state = decoder_outputs
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, context_ids)
             
-            # print('probs is: \n', probs)
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
             eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
-            outs[:, t] = preds.cpu() # .apply_(self.map_to_full)
+            outs[:, t] = preds.cpu()
             if eos_yet.all():
                 break
         return outs

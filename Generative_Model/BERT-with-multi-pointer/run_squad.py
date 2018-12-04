@@ -23,10 +23,12 @@ import collections
 import logging
 import json
 import math
+import copy
 import os
 import random
 import six
 from tqdm import tqdm, trange
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -304,30 +306,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 while len(answer_ids) < 17:
                     answer_ids.append(0)
                     answer_mask.append(0)
-
-            # if example_index < 20:
-            #     logger.info("*** Example ***")
-            #     logger.info("unique_id: %s" % (unique_id))
-            #     logger.info("example_index: %s" % (example_index))
-            #     logger.info("doc_span_index: %s" % (doc_span_index))
-            #     logger.info("tokens: %s" % " ".join(
-            #         [tokenization.printable_text(x) for x in tokens]))
-            #     logger.info("token_to_orig_map: %s" % " ".join(
-            #         ["%d:%d" % (x, y) for (x, y) in six.iteritems(token_to_orig_map)]))
-            #     logger.info("token_is_max_context: %s" % " ".join([
-            #         "%d:%s" % (x, y) for (x, y) in six.iteritems(token_is_max_context)
-            #     ]))
-            #     logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            #     logger.info(
-            #         "input_mask: %s" % " ".join([str(x) for x in input_mask]))
-            #     logger.info(
-            #         "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            #     if is_training:
-            #         answer_text = " ".join(tokens[start_position:(end_position + 1)])
-            #         logger.info("start_position: %d" % (start_position))
-            #         logger.info("end_position: %d" % (end_position))
-            #         logger.info(
-            #             "answer: %s" % (tokenization.printable_text(answer_text)))
 
             features.append(
                 InputFeatures(
@@ -718,30 +696,6 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         param_opti.grad.data.copy_(param_model.grad.data)
     return is_nan
 
-# def decode_to_vocab(batch):
-#     with torch.cuda.device_of(batch):
-#         batch = batch.tolist()
-#     batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch]
-    
-#     def trim(s, t):
-#         sentence = []
-#         for w in s:
-#             if w == t:
-#                 break
-#             sentence.append(w)
-#             return sentence
-
-#     batch = [trim(ex, '[CLS]') for ex in batch]
-
-#     def filter_special(tok):
-#         return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
-
-#     batch = [filter(filter_special, ex) for ex in batch]
-
-#     return [''.join(ex) for ex in batch]
-
-# eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask
-
 def eval_the_model(args, model, eval_data):
     if args.local_rank == -1:
         eval_sampler = RandomSampler(eval_data)
@@ -753,19 +707,21 @@ def eval_the_model(args, model, eval_data):
     eval_batch = 0
     n_gpu = torch.cuda.device_count()
 
-    for step, batch in enumerate(tqdm(eval_dataloader, desc="Iteration")):
+    for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
         if n_gpu == 1:
             batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-        # input_ids, input_mask, segment_ids, start_positions, end_positions = batch
+        print('batch is \n', batch)
+        print('batch length is \n', len(batch))
         input_ids, input_mask, segment_ids, eval_example_index, answer_ids, answer_mask = batch
-        loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        
+        # loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        t = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        print('the model output is\n', t)
+
         eval_loss += loss.mean().detach().cpu()
         eval_batch += 1
     eval_loss /= eval_batch
+
     return eval_loss, math.pow(math.e, eval_loss)
-
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -850,6 +806,10 @@ def main():
     parser.add_argument('--half_dim',
                         default=False, action='store_true',
                         help='reduce the dimention of decoder.')
+    parser.add_argument('--load_trained_model',
+                        default=False, action='store_true',
+                        help='reduce the dimention of decoder.')
+
 
     args = parser.parse_args()
 
@@ -911,6 +871,7 @@ def main():
     train_examples = None
     num_train_steps = None
     if args.do_train:
+        print('Preprocess the train dataset.')
         train_examples = read_squad_examples(
             input_file=args.train_file, is_training=True)
         num_train_steps = int(
@@ -933,30 +894,42 @@ def main():
         train_answer_mask = torch.tensor([f.answer_mask for f in train_features], dtype=torch.long)
         train_data = TensorDataset(train_input_ids, train_input_mask, train_segment_ids,
                            train_start_positions, train_end_positions, train_answer_ids, train_answer_mask)
+    
+    print('Preprocess the dev dataset.')
+    # eval_examples = read_squad_examples(
+    #     input_file=args.predict_file, is_training=True)
+    # eval_features = convert_examples_to_features(
+    #     examples=eval_examples,
+    #     tokenizer=tokenizer,
+    #     max_seq_length=args.max_seq_length,
+    #     doc_stride=args.doc_stride,
+    #     max_query_length=args.max_query_length,
+    #     is_training=True)
 
-    eval_examples = read_squad_examples(
-        input_file=args.predict_file, is_training=True)
-    eval_features = convert_examples_to_features(
-        examples=eval_examples,
-        tokenizer=tokenizer,
-        max_seq_length=args.max_seq_length,
-        doc_stride=args.doc_stride,
-        max_query_length=args.max_query_length,
-        is_training=True)
-
-    eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
-    eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
-    eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
-    eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
+    # eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    # eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    # eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+    # eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
+    # eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
+    # eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
+    # eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
+    eval_data = copy.deepcopy(train_data)
 
     # Prepare model
     # model = BertForQuestionAnswering(bert_config)
     model = BertWithMultiPointer(bert_config)
     if args.init_checkpoint is not None:
+        print('Loading the pre-trained BERT parameters')
         model.bert.load_state_dict(torch.load(args.init_checkpoint, map_location='cpu'))
+    if args.load_trained_model:
+        print('Loading the pre-trained Model')
+        model_path = args.output_dir+'/models/best_params.pt'
+        state_dict = torch.load(model_path)
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k[7:] # remove module.
+            new_state_dict[name] = v
+        model.load_state_dict(new_state_dict)
     if args.fp16:
         model.half()
     model.to(device)
@@ -964,8 +937,8 @@ def main():
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank)
     elif n_gpu > 1:
-        # model = torch.nn.DataParallel(model)
-        model = DataParallelModel(model)
+        model = torch.nn.DataParallel(model)
+        # model = DataParallelModel(model)
 
     # Prepare optimizer
     if args.fp16:
