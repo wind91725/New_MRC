@@ -38,6 +38,8 @@ from tokenization import load_idx_to_token
 from modeling import BertConfig, BertForQuestionAnswering, BertWithMultiPointer
 from optimization import BERTAdam
 
+from parallel import DataParallelModel, DataParallelCriterion
+
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
@@ -922,11 +924,6 @@ def main():
             max_query_length=args.max_query_length,
             is_training=True)
 
-        # logger.info("***** Running training *****")
-        # logger.info("  Num orig examples = %d", len(train_examples))
-        # logger.info("  Num split examples = %d", len(train_features))
-        # logger.info("  Batch size = %d", args.train_batch_size)
-        # logger.info("  Num steps = %d", num_train_steps)
         train_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         train_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         train_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
@@ -967,7 +964,8 @@ def main():
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank)
     elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        # model = torch.nn.DataParallel(model)
+        model = DataParallelModel(model)
 
     # Prepare optimizer
     if args.fp16:
@@ -982,12 +980,10 @@ def main():
     # exit(0)
     no_decay = ['bias', 'gamma', 'beta']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if n not in no_decay and 'bert' in n], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if n not in no_decay and 'bert' not in n], 'weight_decay_rate': 0.01, 'lr': args.decoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if n in no_decay and 'bert' in n], 'weight_decay_rate': 0.0, 'lr': args.encoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if n in no_decay and 'bert' not in n], 'weight_decay_rate': 0.0, 'lr': args.decoder_learning_rate},
-        # {'params': [p for n, p in param_optimizer if 'bert' in n], 'lr': args.encoder_learning_rate},
-        # {'params': [p for n, p in param_optimizer if 'bert' not in n], 'lr': args.decoder_learning_rate}
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay_rate': 0.01, 'lr': args.decoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay_rate': 0.0, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay_rate': 0.0, 'lr': args.decoder_learning_rate},
         ]
     optimizer = BERTAdam(optimizer_grouped_parameters,
                          lr=args.encoder_learning_rate,
@@ -1113,10 +1109,7 @@ def main():
                             sentence.append(w)
                         return sentence
 
-                    # if isContext:
                     batch = [trim(ex, '[PAD]') for ex in batch]
-                    # else:
-                    #     batch = [trim(ex, '[CLS]') for ex in batch]
 
                     def filter_special(tok):
                         return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
