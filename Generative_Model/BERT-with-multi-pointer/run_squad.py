@@ -710,12 +710,12 @@ def eval_the_model(args, model, eval_data):
     for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
         if n_gpu == 1:
             batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-        print('batch is \n', batch)
-        print('batch length is \n', len(batch))
+        # print('batch is \n', batch)
+        # print('batch length is \n', len(batch))
         input_ids, input_mask, segment_ids, eval_example_index, answer_ids, answer_mask = batch
-        # loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        t = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        print('the model output is\n', t)
+        loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        # t = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        # print('the model output is\n', t)
 
         eval_loss += loss.mean().detach().cpu()
         eval_batch += 1
@@ -896,24 +896,24 @@ def main():
                            train_start_positions, train_end_positions, train_answer_ids, train_answer_mask)
     
     print('Preprocess the dev dataset.')
-    # eval_examples = read_squad_examples(
-    #     input_file=args.predict_file, is_training=True)
-    # eval_features = convert_examples_to_features(
-    #     examples=eval_examples,
-    #     tokenizer=tokenizer,
-    #     max_seq_length=args.max_seq_length,
-    #     doc_stride=args.doc_stride,
-    #     max_query_length=args.max_query_length,
-    #     is_training=True)
+    eval_examples = read_squad_examples(
+        input_file=args.predict_file, is_training=True)
+    eval_features = convert_examples_to_features(
+        examples=eval_examples,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_seq_length,
+        doc_stride=args.doc_stride,
+        max_query_length=args.max_query_length,
+        is_training=True)
 
-    # eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    # eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    # eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    # eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
-    # eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
-    # eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
-    # eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
-    eval_data = copy.deepcopy(train_data)
+    eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+    eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
+    eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
+    eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
+    eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
+    # eval_data = copy.deepcopy(train_data)
 
     # Prepare model
     # model = BertForQuestionAnswering(bert_config)
