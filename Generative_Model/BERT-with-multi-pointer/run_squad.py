@@ -845,6 +845,9 @@ def main():
     parser.add_argument('--loss_scale',
                         type=float, default=128,
                         help='Loss scaling, positive power of 2 values can improve fp16 convergence.')
+    parser.add_argument('--half_dim',
+                        default=False, action='store_true',
+                        help='reduce the dimention of decoder.')
 
     args = parser.parse_args()
 
@@ -887,6 +890,7 @@ def main():
                 "If `do_predict` is True, then `predict_file` must be specified.")
 
     bert_config = BertConfig.from_json_file(args.bert_config_file)
+    bert_config.half_dim = args.half_dim
 
     if args.max_seq_length > bert_config.max_position_embeddings:
         raise ValueError(
@@ -990,13 +994,14 @@ def main():
                          warmup=args.warmup_proportion,
                          t_total=num_train_steps)
 
-    eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
-    with open(args.output_dir+'/log.txt', 'w') as f:
-        f.write('Before train, the average loss on val set is: ' + str(eval_loss.float()) + ' and the average ppl on val set is: ' + str(eval_ppl))
-        f.write('\n\n')
-
     global_step = 0
     if args.do_train:
+
+        eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
+        best_ppl = eval_ppl
+        with open(args.output_dir+'/log.txt', 'w') as f:
+            f.write('Before train, the average loss on val set is: ' + str(eval_loss.float()) + ' and the average ppl on val set is: ' + str(eval_ppl))
+            f.write('\n\n')
         
         model.train()
 
@@ -1054,7 +1059,10 @@ def main():
                 f.write('In epoch-' + str(epoch) + ' the average loss on train set is: ' + str(train_loss.float()) + ' the average ppl on train set is: ' + str(train_ppl))
                 f.write('\n')
                 f.write('In epoch-' + str(epoch) + ' the average loss on eval set is: ' + str(eval_loss.float()) + ' the average ppl on eval set is: ' + str(eval_ppl))
-                f.write('\n')
+                f.write('\n\n')
+            if eval_ppl < best_ppl:
+                model_save_path = args.output_dir+'/models/best_params.pt'
+                torch.save(model.state_dict(), model_save_path)
             
  
     if args.do_predict:
