@@ -920,7 +920,17 @@ def main():
     model = BertWithMultiPointer(bert_config)
     if args.init_checkpoint is not None:
         print('Loading the pre-trained BERT parameters')
-        model.bert.load_state_dict(torch.load(args.init_checkpoint, map_location='cpu'))
+        state_dict = torch.load(args.init_checkpoint, map_location='cpu')
+        model.bert.load_state_dict(state_dict)
+        decoder_embedding = ["word_embeddings.weight", "position_embeddings.weight", "token_type_embeddings.weight", "LayerNorm.gamma", "LayerNorm.beta"]
+        decoder_embedding = ['embeddings.'+n for n in decoder_embedding]
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k in decoder_embedding:
+                name = k[11:]
+                new_state_dict[name] = v
+        model.decoderEmbedding.load_state_dict(new_state_dict)
+     
     if args.load_trained_model:
         print('Loading the pre-trained Model')
         model_path = args.output_dir+'/models/best_params.pt'
@@ -930,6 +940,7 @@ def main():
             name = k[7:] # remove module.
             new_state_dict[name] = v
         model.load_state_dict(new_state_dict)
+    
     if args.fp16:
         model.half()
     model.to(device)
@@ -953,10 +964,10 @@ def main():
     # exit(0)
     no_decay = ['bias', 'gamma', 'beta']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay_rate': 0.01, 'lr': args.decoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay_rate': 0.0, 'lr': args.encoder_learning_rate},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay_rate': 0.0, 'lr': args.decoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and ('bert' in n or 'decoderEmbedding' in n)], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and ('bert' not in n and 'decoderEmbedding' not in n)], 'weight_decay_rate': 0.01, 'lr': args.decoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and ('bert' in n or 'decoderEmbedding' in n)], 'weight_decay_rate': 0.0, 'lr': args.encoder_learning_rate},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and ('bert' not in n and 'decoderEmbedding' not in n)], 'weight_decay_rate': 0.0, 'lr': args.decoder_learning_rate},
         ]
     optimizer = BERTAdam(optimizer_grouped_parameters,
                          lr=args.encoder_learning_rate,
@@ -1051,22 +1062,12 @@ def main():
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
-        #     with torch.no_grad():
-        #         batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
-        #     for i, example_index in enumerate(example_indices):
-        #         start_logits = batch_start_logits[i].detach().cpu().tolist()
-        #         end_logits = batch_end_logits[i].detach().cpu().tolist()
-        #         eval_feature = eval_features[example_index.item()]
-        #         unique_id = int(eval_feature.unique_id)
-        #         all_results.append(RawResult(unique_id=unique_id,
-        #                                      start_logits=start_logits,
-        #                                      end_logits=end_logits))
-        # output_prediction_file = os.path.join(args.output_dir, "predictions.json")
-        # output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
-        # write_predictions(eval_examples, eval_features, all_results,
-        #                   args.n_best_size, args.max_answer_length,
-        #                   args.do_lower_case, output_prediction_file,
-        #                   output_nbest_file, args.verbose_logging)
+            answer_ids = answer_ids.to(device)
+            # print('input_ids is:\n', input_ids)
+            # print('input_mask is:\n', input_mask)
+            # print('segment_ids is:\n', segment_ids)
+            # print('answer_ids is:\n', answer_ids)
+
             with torch.no_grad():
 
                 def decode_to_vocab(batch, isContext=False):
@@ -1091,10 +1092,8 @@ def main():
 
                     return [' '.join(ex) if ex != None else '' for ex in batch]
 
-                loss, outs = model(input_ids, segment_ids, input_mask)
-                # print('input id is:\n', input_ids)
-                # print('outs is:\n', outs)
-                # exit(0)
+                loss, outs = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
+                
                 ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
                 decode_contexts = decode_to_vocab(input_ids, isContext=True)

@@ -152,20 +152,37 @@ class BERTEmbeddings(nn.Module):
         self.LayerNorm = BERTLayerNorm(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, input_ids, token_type_ids=None):
+    def forward(self, input_ids, token_type_ids=None, position=None):
         seq_length = input_ids.size(1)
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        if position is None:
+            position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        else:
+            position_ids = torch.tensor([position], dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
         words_embeddings = self.word_embeddings(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
+        
+        # if position is None:
+        #     print('inputs_ids is \n', input_ids[:, :3])
+        #     print('words_embeddings is \n', words_embeddings[:, :3, :5])
+        #     print('position_ids is \n', position_ids[:, :3])
+        #     print('position_embeddings is \n', position_embeddings[:, :3, :5])
+        #     print('token_type_ids is \n', token_type_ids[:, :3])
+        #     print('token_type_embeddings is \n', token_type_embeddings[:, :3, :5])
 
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
+        # if position is None:
+        #     print('embeddings is \n', embeddings[:, :3, :5])
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
+        # if position is None:
+        #     print('embeddings after ln&dp is \n', embeddings[:, :3, :5])
         return embeddings
 
 
@@ -363,11 +380,14 @@ class BertModel(nn.Module):
         # Since we are adding it to the raw scores before the softmax, this is
         # effectively the same as removing these entirely.
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        extended_attention_mask = (1.0 - extended_attention_mask) * -1000000.0
 
+        # print('extended_attention_mask:\n',extended_attention_mask)
         embedding_output = self.embeddings(input_ids, token_type_ids)
+        # print('embedding_output:\n',embedding_output)
         all_encoder_layers = self.encoder(embedding_output, extended_attention_mask)
         sequence_output = all_encoder_layers[-1]
+        # print('sequence_output:\n',sequence_output)
         pooled_output = self.pooler(sequence_output)
         return all_encoder_layers, pooled_output
 
@@ -512,7 +532,7 @@ class BertWithMultiPointer(nn.Module):
         # TODO check with Google if it's normal there is no dropout on the token classifier of SQuAD in the TF version
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.qa_outputs = nn.Linear(config.hidden_size, 2)
-        self.decoderEmbedding = copy.deepcopy(BERTEmbeddings(config))
+        self.decoderEmbedding = BERTEmbeddings(config)
         self.half_dim = config.half_dim
         def init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -541,7 +561,14 @@ class BertWithMultiPointer(nn.Module):
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
+        print('all_encoder_layers is\n', all_encoder_layers)
+        print('all_encoder_layers length is\n', len(all_encoder_layers))
+        print('all_encoder_layers[-1] is\n', all_encoder_layers[-1])
+        print('all_encoder_layers[-1] size is\n', all_encoder_layers[-1].size())
+
         sequence_output = all_encoder_layers[-1]
+        # print('self_attended_context before linear&ln is:\n', sequence_output)
+        # print('self_attended_context size before linear&ln is:\n', sequence_output.size())
         sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.half_dim else sequence_output
         
         context_padding = attention_mask.data == 0
@@ -565,32 +592,46 @@ class BertWithMultiPointer(nn.Module):
             return loss, None
         else:
             # self.dual_ptr_rnn_decoder.applyMasks(context_padding)
-            return None, self.greedy(sequence_output, input_ids).data
+            return None, self.greedy(sequence_output, input_ids, answer_ids = answer_ids).data
 
-    def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None):
+    def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None, answer_ids=None):
         B, TC, C = self_attended_context.size()
         T = 15 # suppose the max length of answer is 15
-        outs = self_attended_context.new_full((B, T), 0, dtype=torch.long)
+        outs = self_attended_context.new_full((B, T), 0, dtype=torch.long) # The index of [PAD] is 0. 
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
-        hiddens[0] = hiddens[0] + positional_encodings_like(hiddens[0])
+        hiddens[0] = hiddens[0] # + positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
-    
+        # print('answer_ids is\n', answer_ids)
+        # print('answer_ids size is\n', answer_ids.size())
+        # print('answer_ids[:, t] is\n', answer_ids[:, 0])
+        # print('answer_ids[:, t] size is\n', answer_ids[:, 0].size())
+        # exit(0)
+        # print('self_attended_context is:\n', self_attended_context)
+        # print('self_attended_context size is:\n', self_attended_context.size())
         for t in range(T):
-            if t == 0:
-                embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
-            else:
-                embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
-            print('at step-'+str(t)+', the embedding is:\n', embedding)
+            # if t == 0:
+            #     embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
+            # else:
+            #     embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
+            embedding = self.decoderEmbedding(answer_ids[:, t].unsqueeze(1), position=t)
+            # print('at step-'+str(t)+' the outs is:\n', outs)
+            # print('at step-'+str(t)+', the embedding is:\n', embedding[:,0,:10])
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.half_dim else embedding
+            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', embedding[:,0,:10])
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
+            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', hiddens[0][:, t, :10])
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t + 1], hiddens[l][:, :t + 1])
                   , self_attended_context, self_attended_context))
+            # print('at step-'+str(t)+', the q is:\n', hiddens[-1][:,t,:10])
             decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
+            # print('at step-'+str(t)+', the context_question_outputs is:\n', context_question_outputs[:,:,:10])
+            # print('at step-'+str(t)+', the context_question_attention is:\n', context_question_attention[:,:,:10])
+            # print('at step-'+str(t)+', the vocab_pointer_switches is:\n', vocab_pointer_switches[:,:,:10])
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, context_ids)
             
@@ -649,7 +690,7 @@ class DualPtrRNNDecoder(nn.Module):
         # context_output = output.squeeze(1) if output is not None else self.make_init_output(context)
         # context_alignment = context_alignment if context_alignment is not None else self.make_init_output(context)
         # question_alignment = question_alignment if question_alignment is not None else self.make_init_output(question)
-        context_quesstion_output = output.squeeze(1) if output is not None else self.make_init_output(context_question)
+        # context_question_output = output.squeeze(1) if output is not None else self.make_init_output(context_question)
         context_question_alignment = context_question_alignment if context_question_alignment is not None else self.make_init_output(context_question)
 
         # context_outputs, vocab_pointer_switches, context_question_switches, context_attentions, question_attentions, context_alignments, question_alignments = [], [], [], [], [], [], []
@@ -657,9 +698,9 @@ class DualPtrRNNDecoder(nn.Module):
         for emb_t in input.split(1, dim=1):
             emb_t = emb_t.squeeze(1)
             # context_output = self.dropout(context_output)
-            context_quesstion_output = self.dropout(context_quesstion_output)
+            # context_question_output = self.dropout(context_question_output)
             # if self.input_feed:
-            #     emb_t = torch.cat([emb_t, context_quesstion_output], 1)
+            #     emb_t = torch.cat([emb_t, context_question_output], 1)
             # dec_state, hidden = self.rnn(emb_t, hidden)
             context_question_output, context_question_attention, context_question_alignment = self.context_question_attn(emb_t, context_question)            
             vocab_pointer_switch = self.vocab_pointer_switch(torch.cat([emb_t, context_question_output], -1))
