@@ -554,21 +554,15 @@ class BertWithMultiPointer(nn.Module):
             self.ln_answer = LayerNorm(half_dim)
             self.ln_context = LayerNorm(half_dim)
 
-        self.self_attentive_decoder = TransformerDecoder(half_dim, 6, 1536, 3, 0.2) if self.half_dim else TransformerDecoder(config.hidden_size, 12, 3072, 3, 0.2)
+        self.self_attentive_decoder = TransformerDecoder(half_dim, 6, 1536, 1, 0.2) if self.half_dim else TransformerDecoder(config.hidden_size, 12, 3072, 1, 0.2)
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(half_dim, half_dim, dropout=0.2) if self.half_dim else DualPtrRNNDecoder(config.hidden_size, config.hidden_size, dropout=0.2)
         self.vocab_size = config.vocab_size
         self.out = nn.Linear(half_dim, self.vocab_size) if self.half_dim else nn.Linear(config.hidden_size, self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
-        print('all_encoder_layers is\n', all_encoder_layers)
-        print('all_encoder_layers length is\n', len(all_encoder_layers))
-        print('all_encoder_layers[-1] is\n', all_encoder_layers[-1])
-        print('all_encoder_layers[-1] size is\n', all_encoder_layers[-1].size())
 
         sequence_output = all_encoder_layers[-1]
-        # print('self_attended_context before linear&ln is:\n', sequence_output)
-        # print('self_attended_context size before linear&ln is:\n', sequence_output.size())
         sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.half_dim else sequence_output
         
         context_padding = attention_mask.data == 0
@@ -580,7 +574,7 @@ class BertWithMultiPointer(nn.Module):
             answer_embedding = self.ln_answer(self.linear_answer(answer_embedding)) if self.half_dim else answer_embedding
             # print('answer_embedding size is: ', answer_embedding.size())
             # print('sequence_output is: ', sequence_output.size())
-            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=True)
+            self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=False)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
@@ -596,47 +590,43 @@ class BertWithMultiPointer(nn.Module):
 
     def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None, answer_ids=None):
         B, TC, C = self_attended_context.size()
-        T = 15 # suppose the max length of answer is 15
+        T = 10 # suppose the max length of answer is 15
         outs = self_attended_context.new_full((B, T), 0, dtype=torch.long) # The index of [PAD] is 0. 
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
-        hiddens[0] = hiddens[0] # + positional_encodings_like(hiddens[0])
+        hiddens[0] = hiddens[0] #+ positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
-        # print('answer_ids is\n', answer_ids)
-        # print('answer_ids size is\n', answer_ids.size())
-        # print('answer_ids[:, t] is\n', answer_ids[:, 0])
-        # print('answer_ids[:, t] size is\n', answer_ids[:, 0].size())
-        # exit(0)
         # print('self_attended_context is:\n', self_attended_context)
         # print('self_attended_context size is:\n', self_attended_context.size())
         for t in range(T):
-            # if t == 0:
-            #     embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long)) # the index of "[CLS]" is 101 
-            # else:
-            #     embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1))
-            embedding = self.decoderEmbedding(answer_ids[:, t].unsqueeze(1), position=t)
-            # print('at step-'+str(t)+' the outs is:\n', outs)
-            # print('at step-'+str(t)+', the embedding is:\n', embedding[:,0,:10])
+            if t == 0:
+                embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
+            else:
+                embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1), position=t)
+            # embedding = self.decoderEmbedding(answer_ids[:, t].unsqueeze(1), position=t)
+            # print('at step-'+str(t)+' the inputs_id is:\n', answer_ids[:, t])
+            # print('at step-'+str(t)+', the embedding is:\n', embedding[:,0,:6])
             # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.half_dim else embedding
-            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', embedding[:,0,:10])
+            # print('at step-'+str(t)+', after ln, the embedding is:\n', embedding[:,0,:6])
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
-            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', hiddens[0][:, t, :10])
+            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', hiddens[0][:, t, :6])
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
-                    self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t + 1], hiddens[l][:, :t + 1])
+                    self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t+1], hiddens[l][:, :t+1])
                   , self_attended_context, self_attended_context))
-            # print('at step-'+str(t)+', the q is:\n', hiddens[-1][:,t,:10])
+            # print('at step-'+str(t)+', the q is:\n', hiddens[-1][:,t,:6])
             decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
-            # print('at step-'+str(t)+', the context_question_outputs is:\n', context_question_outputs[:,:,:10])
-            # print('at step-'+str(t)+', the context_question_attention is:\n', context_question_attention[:,:,:10])
-            # print('at step-'+str(t)+', the vocab_pointer_switches is:\n', vocab_pointer_switches[:,:,:10])
+            # print('at step-'+str(t)+', the context_question_outputs is:\n', context_question_outputs[:,:,:6])
+            # print('at step-'+str(t)+', the context_question_attention is:\n', context_question_attention[:,:,:6])
+            # print('at step-'+str(t)+', the vocab_pointer_switches is:\n', vocab_pointer_switches[:,:,:6])
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, context_ids)
             
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
+            # print('at step-'+str(t)+', the preds is:\n', preds)
             eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
             outs[:, t] = preds.cpu()
             if eos_yet.all():

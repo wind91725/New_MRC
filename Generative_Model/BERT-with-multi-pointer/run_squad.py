@@ -298,12 +298,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 # get the answer tokens and ids for multi pointer network.
                 answer_tokens = tokens[start_position:(end_position + 1)]
                 answer_tokens.insert(0, "[CLS]")
-                answer_tokens = answer_tokens[:16]                   # Suppose the answer's max_length is 15, and 2 special symbols.
+                answer_tokens = answer_tokens[:11]                   # Suppose the answer's max_length is 15, and 2 special symbols.
                 answer_tokens.append("[SEP]")
                 answer_ids = tokenizer.convert_tokens_to_ids(answer_tokens)
                 answer_mask = [1] * (len(answer_ids) - 1)
                 answer_mask.append(0)
-                while len(answer_ids) < 17:
+                while len(answer_ids) < 12:
                     answer_ids.append(0)
                     answer_mask.append(0)
 
@@ -1042,6 +1042,8 @@ def main():
                 f.write('\n\n')
             if eval_ppl < best_ppl:
                 model_save_path = args.output_dir+'/models/best_params.pt'
+                if os.path.exists(model_save_path):
+                    os.remove(model_save_path) 
                 torch.save(model.state_dict(), model_save_path)
             
  
@@ -1093,7 +1095,7 @@ def main():
                     return [' '.join(ex) if ex != None else '' for ex in batch]
 
                 loss, outs = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
-                
+
                 ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
                 decode_contexts = decode_to_vocab(input_ids, isContext=True)
