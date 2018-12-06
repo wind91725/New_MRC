@@ -710,12 +710,9 @@ def eval_the_model(args, model, eval_data):
     for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
         if n_gpu == 1:
             batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-        # print('batch is \n', batch)
-        # print('batch length is \n', len(batch))
+            
         input_ids, input_mask, segment_ids, eval_example_index, answer_ids, answer_mask = batch
         loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        # t = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        # print('the model output is\n', t)
 
         eval_loss += loss.mean().detach().cpu()
         eval_batch += 1
@@ -1065,10 +1062,6 @@ def main():
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
             answer_ids = answer_ids.to(device)
-            # print('input_ids is:\n', input_ids)
-            # print('input_mask is:\n', input_mask)
-            # print('segment_ids is:\n', segment_ids)
-            # print('answer_ids is:\n', answer_ids)
 
             with torch.no_grad():
 

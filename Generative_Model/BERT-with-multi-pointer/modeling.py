@@ -522,8 +522,8 @@ class BertWithMultiPointer(nn.Module):
     config = BertConfig(vocab_size=32000, hidden_size=512,
         num_hidden_layers=8, num_attention_heads=6, intermediate_size=1024)
 
-    model = BertForQuestionAnswering(config)
-    start_logits, end_logits = model(input_ids, token_type_ids, input_mask)
+    model = BertWithMultiPointer(config)
+    loss, probs = model(input_ids, token_type_ids, input_mask)
     ```
     """
     def __init__(self, config):
@@ -572,8 +572,6 @@ class BertWithMultiPointer(nn.Module):
         if self.training:
             answer_embedding = self.decoderEmbedding(answer_ids)
             answer_embedding = self.ln_answer(self.linear_answer(answer_embedding)) if self.half_dim else answer_embedding
-            # print('answer_embedding size is: ', answer_embedding.size())
-            # print('sequence_output is: ', sequence_output.size())
             self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=False)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
@@ -581,11 +579,9 @@ class BertWithMultiPointer(nn.Module):
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, input_ids)
             probs, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
-            # print('prob size is')
             loss = F.nll_loss(probs.log(), targets)
             return loss, None
         else:
-            # self.dual_ptr_rnn_decoder.applyMasks(context_padding)
             return None, self.greedy(sequence_output, input_ids, answer_ids = answer_ids).data
 
     def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None, answer_ids=None):
@@ -595,38 +591,25 @@ class BertWithMultiPointer(nn.Module):
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] #+ positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
-        # print('self_attended_context is:\n', self_attended_context)
-        # print('self_attended_context size is:\n', self_attended_context.size())
         for t in range(T):
             if t == 0:
                 embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1), position=t)
-            # embedding = self.decoderEmbedding(answer_ids[:, t].unsqueeze(1), position=t)
-            # print('at step-'+str(t)+' the inputs_id is:\n', answer_ids[:, t])
-            # print('at step-'+str(t)+', the embedding is:\n', embedding[:,0,:6])
-            # hiddens[0][:, t] = hiddens[0][:, t] + (math.sqrt(self.self_attentive_decoder.d_model) * embedding).squeeze(1) ???
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.half_dim else embedding
-            # print('at step-'+str(t)+', after ln, the embedding is:\n', embedding[:,0,:6])
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
-            # print('at step-'+str(t)+', the embedding with positional embedding is:\n', hiddens[0][:, t, :6])
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t+1], hiddens[l][:, :t+1])
                   , self_attended_context, self_attended_context))
-            # print('at step-'+str(t)+', the q is:\n', hiddens[-1][:,t,:6])
             decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
-            # print('at step-'+str(t)+', the context_question_outputs is:\n', context_question_outputs[:,:,:6])
-            # print('at step-'+str(t)+', the context_question_attention is:\n', context_question_attention[:,:,:6])
-            # print('at step-'+str(t)+', the vocab_pointer_switches is:\n', vocab_pointer_switches[:,:,:6])
-
+            
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, context_ids)
             
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
-            # print('at step-'+str(t)+', the preds is:\n', preds)
             eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
             outs[:, t] = preds.cpu()
             if eos_yet.all():
@@ -663,58 +646,31 @@ class DualPtrRNNDecoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = nn.Dropout(dropout)
 
-        # self.input_feed = True
-        # if self.input_feed:
-        #     d_in += 1 * d_hid
-
-        # self.rnn = LSTMDecoder(self.num_layers, d_in, d_hid, dropout)
-        # self.context_attn = LSTMDecoderAttention(d_hid, dot=True)
-        # self.question_attn = LSTMDecoderAttention(d_hid, dot=True)
         self.context_question_attn = LSTMDecoderAttention(d_hid, dot=True)
 
         self.vocab_pointer_switch = nn.Sequential(Feedforward(self.d_hid + d_in, 1), nn.Sigmoid())
-        # self.context_question_switch = nn.Sequential(Feedforward(2 * self.d_hid + d_in, 1), nn.Sigmoid())
-
-    # def forward(self, input, context, question, output=None, hidden=None, context_alignment=None, question_alignment=None):
+        
     def forward(self, input, context_question, output=None, hidden=None, context_question_alignment=None):
-        # context_output = output.squeeze(1) if output is not None else self.make_init_output(context)
-        # context_alignment = context_alignment if context_alignment is not None else self.make_init_output(context)
-        # question_alignment = question_alignment if question_alignment is not None else self.make_init_output(question)
-        # context_question_output = output.squeeze(1) if output is not None else self.make_init_output(context_question)
         context_question_alignment = context_question_alignment if context_question_alignment is not None else self.make_init_output(context_question)
 
-        # context_outputs, vocab_pointer_switches, context_question_switches, context_attentions, question_attentions, context_alignments, question_alignments = [], [], [], [], [], [], []
         context_question_outputs, vocab_pointer_switches, context_question_attentions, context_question_alignments = [], [], [], []
         for emb_t in input.split(1, dim=1):
             emb_t = emb_t.squeeze(1)
-            # context_output = self.dropout(context_output)
-            # context_question_output = self.dropout(context_question_output)
-            # if self.input_feed:
-            #     emb_t = torch.cat([emb_t, context_question_output], 1)
-            # dec_state, hidden = self.rnn(emb_t, hidden)
             context_question_output, context_question_attention, context_question_alignment = self.context_question_attn(emb_t, context_question)            
             vocab_pointer_switch = self.vocab_pointer_switch(torch.cat([emb_t, context_question_output], -1))
-            # context_question_switch = self.context_question_switch(torch.cat([dec_state, question_output, emb_t], -1))
             context_question_output = self.dropout(context_question_output)
             context_question_outputs.append(context_question_output)
             vocab_pointer_switches.append(vocab_pointer_switch)
-            # context_question_switches.append(context_question_switch)
             context_question_attentions.append(context_question_attention)
             context_question_alignments.append(context_question_alignment)
-            # question_attentions.append(question_attention)
-            # question_alignments.append(question_alignment)
-
-        # context_outputs, vocab_pointer_switches, context_question_switches, context_attention, question_attention = [self.package_outputs(x) for x in [context_outputs, vocab_pointer_switches, context_question_switches, context_attentions, question_attentions]]
+    
         context_question_outputs, vocab_pointer_switches, context_question_attentions = [self.package_outputs(x) for x in [context_question_outputs, vocab_pointer_switches, context_question_attentions]]
         
-        # return context_outputs, context_attention, question_attention, context_alignment, question_alignment, vocab_pointer_switches, context_question_switches, hidden
         return context_question_outputs, context_question_attentions, context_question_alignments, vocab_pointer_switches, hidden
 
 
     # def applyMasks(self, context_mask, question_mask):
     def applyMasks(self, context_question_mask):
-        # self.context_attn.applyMasks(context_mask)
-        # self.question_attn.applyMasks(question_mask)
         self.context_question_attn.applyMasks(context_question_mask)
 
     def make_init_output(self, context):
