@@ -85,6 +85,7 @@ class InputFeatures(object):
     """A single set of features of data."""
 
     def __init__(self,
+                 qas_id,
                  unique_id,
                  example_index,
                  doc_span_index,
@@ -98,6 +99,7 @@ class InputFeatures(object):
                  end_position=None,
                  answer_ids=None,
                  answer_mask=None):
+        self.qas_id = qas_id
         self.unique_id = unique_id
         self.example_index = example_index
         self.doc_span_index = doc_span_index
@@ -309,6 +311,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
 
             features.append(
                 InputFeatures(
+                    qas_id=example.qas_id,
                     unique_id=unique_id,
                     example_index=example_index,
                     doc_span_index=doc_span_index,
@@ -539,7 +542,6 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
     with open(output_nbest_file, "w") as writer:
         writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
 
-
 def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
     """Project the tokenized prediction back to the original text."""
 
@@ -710,7 +712,7 @@ def eval_the_model(args, model, eval_data):
     for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
         if n_gpu == 1:
             batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-            
+
         input_ids, input_mask, segment_ids, eval_example_index, answer_ids, answer_mask = batch
         loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
 
@@ -909,6 +911,10 @@ def main():
     eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
     eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
     eval_example_index = torch.arange(eval_input_ids.size(0), dtype=torch.long)
+    eval_qas_ids = [f.qas_id for f in eval_features]
+    id_dict = {}
+    for exa_id, qas_id in zip(eval_example_index.tolist(), eval_qas_ids):
+        id_dict[exa_id] = qas_id
     eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_example_index, eval_answer_ids, eval_answer_mask)
     # eval_data = copy.deepcopy(train_data)
 
@@ -1053,11 +1059,9 @@ def main():
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
 
         model.eval()
-        all_results = []
+        all_answers = collections.OrderedDict()
         logger.info("Start evaluating")
-        for input_ids, input_mask, segment_ids, example_indices, answer_ids, answer_mask in tqdm(eval_dataloader, desc="Evaluating"):
-            if len(all_results) % 1000 == 0:
-                logger.info("Processing example: %d" % (len(all_results)))
+        for input_ids, input_mask, segment_ids, qas_ids, answer_ids, answer_mask in tqdm(eval_dataloader, desc="Evaluating"):
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
@@ -1093,12 +1097,23 @@ def main():
                 decode_answers = decode_to_vocab(outs)
                 decode_contexts = decode_to_vocab(input_ids, isContext=True)
 
-                for i, (context, answer, ground_trurh) in enumerate(zip(decode_contexts, decode_answers, ground_trurhs)):
-                    print('context is:\n', context)
-                    print('ground truth is:\n', ground_trurh)
-                    print('answer is:\n', answer)
-                    if i == 1:
-                        break
+                qas_ids = qas_ids.tolist()
+                for answer_idx, answer_text in zip(qas_ids, decode_answers):
+                    # print(answer_idx)
+                    answer_text = answer_text.replace(" ##", "")
+                    answer_text = answer_text.replace("##", "")
+                    all_answers[id_dict[answer_idx]] = answer_text
+
+                # for i, (context, answer, ground_trurh) in enumerate(zip(decode_contexts, decode_answers, ground_trurhs)):
+                #     print('context is:\n', context)
+                #     print('ground truth is:\n', ground_trurh)
+                #     print('answer is:\n', answer)
+                #     if i == 1:
+                #         break
+
+        output_answer_file = args.output_dir+'/predictions/predictions.json'
+        with open(output_answer_file, "w") as f:
+            f.write(json.dumps(all_answers, indent=4) + "\n")
 
 
 if __name__ == "__main__":
