@@ -586,7 +586,7 @@ class BertWithMultiPointer(nn.Module):
 
     def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None, answer_ids=None):
         B, TC, C = self_attended_context.size()
-        T = 10 # suppose the max length of answer is 15
+        T = 100 # suppose the max length of answer is 15
         outs = self_attended_context.new_full((B, T), 0, dtype=torch.long) # The index of [PAD] is 0. 
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] #+ positional_encodings_like(hiddens[0])

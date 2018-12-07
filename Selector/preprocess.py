@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import argparse
+import random
 import numpy as np
 from tqdm import tqdm
 from itertools import groupby
@@ -231,12 +232,61 @@ def get_golden_passage_split(args, split):
     with open(out_file, 'w') as f:
         f.writelines(to_save)
 
+def get_golden_other_passage(args):
+    # for each example, 
+    # if it has a golden passage, select the golden passage and an other passage to get a positive example and a negative example.
+    # if it has no golden passage, select an other passage to get an negative example. 
+    get_golden_other_passage_split(args, 'train')
+    get_golden_other_passage_split(args, 'dev')
+    print('golden passage has processed.')
+
+def get_golden_other_passage_split(args, split):
+    # the output format of an example is golden|other_passage\tquery\tanswer
+    logger.info('loading preprocessed file...')
+    inp_file = os.path.join(args.out_dir, split + '_saved_in_line.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden_other_passage_with_query_answer.txt')
+    to_save = []
+    count_golden_passage = 0
+    count_other_passage = 0
+    with open(inp_file, 'r') as f:
+        exs = f.readlines()
+        for ex in tqdm(exs, ascii = True, desc = 'progress report:'):
+            passages = ex.split('\t')[0]
+            query = ex.split('\t')[1]
+            answers = ex.split('\t')[2]
+            _passages = passages.split('#@#')
+            _answers = answers.split('#@#')
+            random.shuffle(_passages)
+            random.shuffle(_answers)
+            for psg in _passages:
+                parts = psg.split('@@')
+                is_selected = int(parts[0])
+                content = parts[1]
+                if is_selected == 1:
+                    for anw in _answers:
+                        if anw.strip():
+                            count_golden_passage += 1
+                            to_save.append('\t'.join((content, query, anw, '\n')))
+            for psg in _passages:
+                parts = psg.split('@@')
+                is_selected = int(parts[0])
+                content = parts[1]
+                if is_selected == 0:
+                    anw = 'No Answer Present.'
+                    count_other_passage += 1
+                    to_save.append('\t'.join((content, query, anw, '\n')))
+                    break
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
+    print('In '+split+' dataset, the count_golden_passage is %d, and the count_other_passage is %d', count_golden_passage, count_other_passage)
+
 def main():
     # format_file(args)
     # count_is_selected(args)
     # get_correct_answer(args)
     # count_length_distribution()
-    get_golden_passage(args)
+    # get_golden_passage(args)
+    get_golden_other_passage(args)
 
 
 if __name__ == '__main__':

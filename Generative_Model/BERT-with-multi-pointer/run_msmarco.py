@@ -97,7 +97,7 @@ def read_msmarco_examples(input_file, is_training):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r") as f:
         if is_training:
-            data = f.readlines()[:88888]
+            data = f.readlines()[:266666]
         else:
             data = f.readlines()[:666]
 
@@ -644,6 +644,9 @@ def main():
                 #     answer_text = answer_text.replace(" ##", "")
                 #     answer_text = answer_text.replace("##", "")
                 #     all_answers[id_dict[answer_idx]] = answer_text
+        # output_answer_file = args.output_dir+'/predictions/predictions.json'
+        # with open(output_answer_file, "w") as f:
+        #     f.write(json.dumps(all_answers, indent=4) + "\n")
 
                 for i, (context, answer, ground_trurh) in enumerate(zip(decode_contexts, decode_answers, ground_trurhs)):
                     print('context is:\n', context.replace(" ##", ""))
@@ -651,10 +654,6 @@ def main():
                     print('answer is:\n', answer.replace(" ##", ""))
                     if i == 1:
                         break
-
-        output_answer_file = args.output_dir+'/predictions/predictions.json'
-        with open(output_answer_file, "w") as f:
-            f.write(json.dumps(all_answers, indent=4) + "\n")
 
 
 if __name__ == "__main__":
