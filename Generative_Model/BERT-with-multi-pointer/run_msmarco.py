@@ -97,9 +97,10 @@ def read_msmarco_examples(input_file, is_training):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r") as f:
         if is_training:
-            data = f.readlines()[:266666]
+            data = f.readlines()[:166666]
         else:
             data = f.readlines()[:666]
+    random.shuffle(data)
 
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
