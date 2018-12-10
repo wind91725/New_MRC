@@ -96,12 +96,13 @@ class InputFeatures(object):
 def read_msmarco_examples(input_file, is_training):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r") as f:
+        data = f.readlines()
+        random.shuffle(data)
         if is_training:
-            data = f.readlines()[:166666]
+            data = data[:266666]
         else:
-            data = f.readlines()[:666]
-    random.shuffle(data)
-
+            data = data[:16666]
+    
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
             return True
@@ -359,7 +360,9 @@ def main():
     parser.add_argument('--load_trained_model',
                         default=False, action='store_true',
                         help='reduce the dimention of decoder.')
-
+    parser.add_argument('--postfix',
+                        default='',
+                        help='the name of log file to be saved.')
 
     args = parser.parse_args()
 
@@ -478,7 +481,7 @@ def main():
      
     if args.load_trained_model:
         print('Loading the pre-trained Model')
-        model_path = args.output_dir+'/models/best_params.pt'
+        model_path = args.output_dir+'/models/best_params.pt.'+args.postfix
         state_dict = torch.load(model_path)
         new_state_dict = OrderedDict()
         for k, v in state_dict.items():
@@ -524,7 +527,8 @@ def main():
 
         eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
         best_ppl = eval_ppl
-        with open(args.output_dir+'/log.txt', 'w') as f:
+        log_path = os.path.join(args.output_dir, 'log.txt.'+args.postfix)
+        with open(log_path, 'w') as f:
             f.write('Before train, the average loss on val set is: ' + str(eval_loss.float()) + ' and the average ppl on val set is: ' + str(eval_ppl))
             f.write('\n\n')
         
@@ -580,13 +584,13 @@ def main():
             train_loss /= train_batch
             train_ppl = math.pow(math.e, train_loss)
             eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
-            with open(args.output_dir+'/log.txt', 'a') as f:
+            with open(log_path, 'a') as f:
                 f.write('In epoch-' + str(epoch) + ' the average loss on train set is: ' + str(train_loss.float()) + ' the average ppl on train set is: ' + str(train_ppl))
                 f.write('\n')
                 f.write('In epoch-' + str(epoch) + ' the average loss on eval set is: ' + str(eval_loss.float()) + ' the average ppl on eval set is: ' + str(eval_ppl))
                 f.write('\n\n')
             if eval_ppl < best_ppl:
-                model_save_path = args.output_dir+'/models/best_params.pt'
+                model_save_path = os.path.join(args.output_dir, 'models', 'best_params.pt.'+args.postfix)
                 if os.path.exists(model_save_path):
                     os.remove(model_save_path) 
                 torch.save(model.state_dict(), model_save_path)
@@ -624,10 +628,10 @@ def main():
                             sentence.append(w)
                         return sentence
 
-                    batch = [trim(ex, '[PAD]') for ex in batch]
+                    batch = [trim(ex, '[SEP]') for ex in batch]
 
                     def filter_special(tok):
-                        return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
+                        return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]', '[EOS]']
 
                     batch = [filter(filter_special, ex) for ex in batch]
 
@@ -645,7 +649,7 @@ def main():
                 #     answer_text = answer_text.replace(" ##", "")
                 #     answer_text = answer_text.replace("##", "")
                 #     all_answers[id_dict[answer_idx]] = answer_text
-        # output_answer_file = args.output_dir+'/predictions/predictions.json'
+        # output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
         # with open(output_answer_file, "w") as f:
         #     f.write(json.dumps(all_answers, indent=4) + "\n")
 

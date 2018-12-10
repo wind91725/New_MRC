@@ -554,7 +554,7 @@ class BertWithMultiPointer(nn.Module):
             self.ln_answer = LayerNorm(half_dim)
             self.ln_context = LayerNorm(half_dim)
 
-        self.self_attentive_decoder = TransformerDecoder(half_dim, 6, 1536, 1, 0.2) if self.half_dim else TransformerDecoder(config.hidden_size, 12, 3072, 1, 0.2)
+        self.self_attentive_decoder = TransformerDecoder(half_dim, 6, 1536, 2, 0.2) if self.half_dim else TransformerDecoder(config.hidden_size, 12, 3072, 2, 0.2)
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(half_dim, half_dim, dropout=0.2) if self.half_dim else DualPtrRNNDecoder(config.hidden_size, config.hidden_size, dropout=0.2)
         self.vocab_size = config.vocab_size
         self.out = nn.Linear(half_dim, self.vocab_size) if self.half_dim else nn.Linear(config.hidden_size, self.vocab_size)
