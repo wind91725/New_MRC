@@ -533,7 +533,8 @@ class BertWithMultiPointer(nn.Module):
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.decoderEmbedding = BERTEmbeddings(config)
-        self.half_dim = config.half_dim
+        self.reduce_dim = config.reduce_dim
+        self.decoder_layer = config.decoder_layer
         def init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 # Slightly different from the TF version which uses truncated_normal for initialization
@@ -546,24 +547,24 @@ class BertWithMultiPointer(nn.Module):
                 module.bias.data.zero_()
         self.apply(init_weights)
         
-        if self.half_dim:
-            half_dim = int(config.hidden_size/2)
+        decoder_dim = config.hidden_size
+        if self.reduce_dim > 0:
+            decoder_dim = self.reduce_dim
+            self.linear_answer = nn.Linear(config.hidden_size, decoder_dim)
+            self.linear_context = nn.Linear(config.hidden_size, decoder_dim)
+            self.ln_answer = LayerNorm(decoder_dim)
+            self.ln_context = LayerNorm(decoder_dim)
 
-            self.linear_answer = nn.Linear(config.hidden_size, half_dim)
-            self.linear_context = nn.Linear(config.hidden_size, half_dim)
-            self.ln_answer = LayerNorm(half_dim)
-            self.ln_context = LayerNorm(half_dim)
-
-        self.self_attentive_decoder = TransformerDecoder(half_dim, 6, 1536, 2, 0.2) if self.half_dim else TransformerDecoder(config.hidden_size, 12, 3072, 2, 0.2)
-        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(half_dim, half_dim, dropout=0.2) if self.half_dim else DualPtrRNNDecoder(config.hidden_size, config.hidden_size, dropout=0.2)
+        self.self_attentive_decoder = TransformerDecoder(decoder_dim, int(decoder_dim/64), decoder_dim*4, self.decoder_layer, 0.2)
+        self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(decoder_dim, decoder_dim, dropout=0.2)
         self.vocab_size = config.vocab_size
-        self.out = nn.Linear(half_dim, self.vocab_size) if self.half_dim else nn.Linear(config.hidden_size, self.vocab_size)
+        self.out = nn.Linear(decoder_dim, self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
 
         sequence_output = all_encoder_layers[-1]
-        sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.half_dim else sequence_output
+        sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.reduce_dim>0 else sequence_output
         
         context_padding = attention_mask.data == 0
         answer_padding = answer_mask == 0
@@ -571,7 +572,7 @@ class BertWithMultiPointer(nn.Module):
         
         if self.training:
             answer_embedding = self.decoderEmbedding(answer_ids)
-            answer_embedding = self.ln_answer(self.linear_answer(answer_embedding)) if self.half_dim else answer_embedding
+            answer_embedding = self.ln_answer(self.linear_answer(answer_embedding)) if self.reduce_dim>0 else answer_embedding
             self_attended_decoded = self.self_attentive_decoder(answer_embedding[:, :-1].contiguous(), sequence_output, context_padding=context_padding, answer_padding=answer_padding[:, :-1], positional_encodings=False)
 
             decoder_outputs = self.dual_ptr_rnn_decoder(self_attended_decoded, sequence_output)
@@ -597,7 +598,7 @@ class BertWithMultiPointer(nn.Module):
                 embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1), position=t)
-            embedding = self.ln_answer(self.linear_answer(embedding)) if self.half_dim else embedding
+            embedding = self.ln_answer(self.linear_answer(embedding)) if self.reduce_dim>0 else embedding
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
@@ -613,11 +614,6 @@ class BertWithMultiPointer(nn.Module):
             preds = preds.squeeze(1)
             pred_probs = pred_probs.log().squeeze(1)
             eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
-            # print('pred_probs size is', pred_probs.size())
-            # print('answer_scores size is', answer_scores.size())
-            # print('eos_yet is', eos_yet)
-            # print('eos_yet is', eos_yet)
-            # print('pred_probs.cpu()[1-eos_yet.cpu()] size is', pred_probs.cpu()[1-eos_yet.cpu()].size())
             answer_scores += pred_probs * (1-eos_yet.float())
             outs[:, t] = preds.cpu()
             if eos_yet.all():

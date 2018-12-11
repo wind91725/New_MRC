@@ -101,7 +101,7 @@ def read_msmarco_examples(input_file, is_training):
         if is_training:
             data = data
         else:
-            data = data[:666]
+            data = data[:16666]
     
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -354,9 +354,12 @@ def main():
     parser.add_argument('--loss_scale',
                         type=float, default=128,
                         help='Loss scaling, positive power of 2 values can improve fp16 convergence.')
-    parser.add_argument('--half_dim',
-                        default=False, action='store_true',
+    parser.add_argument('--reduce_dim',
+                        default=0, type=int,
                         help='reduce the dimention of decoder.')
+    parser.add_argument('--decoder_layer',
+                        default=1, type=int,
+                        help='the layers of self-attentive-decoder.')
     parser.add_argument('--load_trained_model',
                         default=False, action='store_true',
                         help='reduce the dimention of decoder.')
@@ -405,7 +408,8 @@ def main():
                 "If `do_predict` is True, then `predict_file` must be specified.")
 
     bert_config = BertConfig.from_json_file(args.bert_config_file)
-    bert_config.half_dim = args.half_dim
+    bert_config.reduce_dim = args.reduce_dim
+    bert_config.decoder_layer = args.decoder_layer
 
     if args.max_seq_length > bert_config.max_position_embeddings:
         raise ValueError(
