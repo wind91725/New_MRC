@@ -99,9 +99,9 @@ def read_msmarco_examples(input_file, is_training):
         data = f.readlines()
         random.shuffle(data)
         if is_training:
-            data = data[:266666]
+            data = data
         else:
-            data = data[:16666]
+            data = data[:666]
     
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -110,7 +110,7 @@ def read_msmarco_examples(input_file, is_training):
 
     examples = []
     for sample in data:
-        sample = sample.split('\t') # a list of passage, query, answer and maybe an id
+        sample = sample.split('\t')[:-1] # a list of passage, query, answer and maybe an id
         tokens_lists = [[] for _ in range(len(sample))]
         for idx, item in enumerate(sample):
             prev_is_whitespace = True
@@ -154,7 +154,7 @@ def convert_examples_to_features(examples, tokenizer, p_max_length,
             example_id = sample[-1]
             sample = sample[:-1]
         tokens = [tokenizer.tokenize(item) for item in sample] 
-        passage_tokens, query_tokens, answer_tokens = tokens
+        passage_tokens, query_tokens, answer_tokens = tokens 
         
         passage_tokens = passage_tokens[:p_max_length]
         query_tokens = query_tokens[:q_max_length]
@@ -265,7 +265,7 @@ def eval_the_model(args, model, eval_data):
         if n_gpu == 1:
             batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
 
-        input_ids, input_mask, segment_ids, answer_ids, answer_mask = batch
+        input_ids, input_mask, segment_ids, answer_ids, answer_mask, example_id = batch
         loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
 
         eval_loss += loss.mean().detach().cpu()
@@ -460,8 +460,10 @@ def main():
     eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
     eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
     eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
+    # eval_example_id = torch.tensor([int(f.example_id) for f in eval_features], dtype=torch.long)
+    eval_example_id = torch.tensor([int(0) for f in eval_features], dtype=torch.long)
 
-    eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_answer_ids, eval_answer_mask)
+    eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_answer_ids, eval_answer_mask, eval_example_id)
 
     # Prepare model
     # model = BertForQuestionAnswering(bert_config)
@@ -497,7 +499,6 @@ def main():
                                                           output_device=args.local_rank)
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model)
-        # model = DataParallelModel(model)
 
     # Prepare optimizer
     if args.fp16:
@@ -508,8 +509,6 @@ def main():
                             for n, param in model.named_parameters()]
     else:
         param_optimizer = list(model.named_parameters())
-    # print('param_optimizer is:\n', [n for n, p in param_optimizer])
-    # exit(0)
     no_decay = ['bias', 'gamma', 'beta']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and ('bert' in n or 'decoderEmbedding' in n)], 'weight_decay_rate': 0.01, 'lr': args.encoder_learning_rate},
@@ -605,9 +604,9 @@ def main():
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
 
         model.eval()
-        all_answers = collections.OrderedDict()
         logger.info("Start evaluating")
-        for input_ids, input_mask, segment_ids, answer_ids, answer_mask in tqdm(eval_dataloader, desc="Evaluating"):
+        to_save = []
+        for input_ids, input_mask, segment_ids, answer_ids, answer_mask, example_id in tqdm(eval_dataloader, desc="Evaluating"):
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
@@ -638,27 +637,34 @@ def main():
                     return [' '.join(ex) if ex != None else '' for ex in batch]
 
                 loss, outs = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
-
+                if type(outs) == tuple:
+                    outs, answer_scores = outs
+                    outs = outs.data
+                    answer_scores = answer_scores.tolist()
                 ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
-                decode_contexts = decode_to_vocab(input_ids, isContext=True)
+                # decode_contexts = decode_to_vocab(input_ids, isContext=True)
 
-                # qas_ids = qas_ids.tolist()
-                # for answer_idx, answer_text in zip(qas_ids, decode_answers):
-                #     # print(answer_idx)
-                #     answer_text = answer_text.replace(" ##", "")
-                #     answer_text = answer_text.replace("##", "")
-                #     all_answers[id_dict[answer_idx]] = answer_text
-        # output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
-        # with open(output_answer_file, "w") as f:
-        #     f.write(json.dumps(all_answers, indent=4) + "\n")
+        #         example_id = example_id.tolist()
+        #         for answer_idx, answer_text in zip(example_id, decode_answers):
+        #             # print(answer_idx)
+        #             answer_dict = {}
+        #             answer_text = answer_text.replace(" ##", "")
+        #             answer_text = answer_text.replace("##", "")
+        #             answer_dict['query_id'] = str(answer_idx)
+        #             answer_dict['answers'] = [answer_text]
+        #             to_save.append(json.dumps(answer_dict) + "\n")
+                for i, (answer, ground_trurh, answer_score) in enumerate(zip(decode_answers, ground_trurhs, answer_scores)):
+                    # print('context is:\n', context.replace(" ##", ""))
+                    # print('ground truth is:\n', ground_trurh.replace(" ##", ""))
+                    # print('answer is:\n', answer.replace(" ##", ""))
+                    answer_length = len(answer.split(' '))
+                    to_save.append('\t'.join([ground_trurh.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
 
-                for i, (context, answer, ground_trurh) in enumerate(zip(decode_contexts, decode_answers, ground_trurhs)):
-                    print('context is:\n', context.replace(" ##", ""))
-                    print('ground truth is:\n', ground_trurh.replace(" ##", ""))
-                    print('answer is:\n', answer.replace(" ##", ""))
-                    if i == 1:
-                        break
+        output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
+        with open(output_answer_file, "w") as f:
+            f.writelines(to_save) 
+
 
 
 if __name__ == "__main__":

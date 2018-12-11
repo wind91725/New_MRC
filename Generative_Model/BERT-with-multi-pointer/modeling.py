@@ -582,7 +582,7 @@ class BertWithMultiPointer(nn.Module):
             loss = F.nll_loss(probs.log(), targets)
             return loss, None
         else:
-            return None, self.greedy(sequence_output, input_ids, answer_ids = answer_ids).data
+            return None, self.greedy(sequence_output, input_ids, answer_ids = answer_ids)
 
     def greedy(self, self_attended_context, context_ids, oov_to_limited_idx=None, rnn_state=None, answer_ids=None):
         B, TC, C = self_attended_context.size()
@@ -591,6 +591,7 @@ class BertWithMultiPointer(nn.Module):
         hiddens = [self_attended_context.new_zeros((B, T, C)) for l in range(len(self.self_attentive_decoder.layers) + 1)]
         hiddens[0] = hiddens[0] #+ positional_encodings_like(hiddens[0])
         eos_yet = self_attended_context.new_zeros((B, )).byte()
+        answer_scores = self_attended_context.new_zeros((B, ))
         for t in range(T):
             if t == 0:
                 embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
@@ -610,11 +611,18 @@ class BertWithMultiPointer(nn.Module):
             
             pred_probs, preds = probs.max(-1)
             preds = preds.squeeze(1)
+            pred_probs = pred_probs.log().squeeze(1)
             eos_yet = eos_yet | (preds == 102)  # the index of "[SEP]" is 102
+            # print('pred_probs size is', pred_probs.size())
+            # print('answer_scores size is', answer_scores.size())
+            # print('eos_yet is', eos_yet)
+            # print('eos_yet is', eos_yet)
+            # print('pred_probs.cpu()[1-eos_yet.cpu()] size is', pred_probs.cpu()[1-eos_yet.cpu()].size())
+            answer_scores += pred_probs * (1-eos_yet.float())
             outs[:, t] = preds.cpu()
             if eos_yet.all():
                 break
-        return outs
+        return outs, answer_scores
 
     def probs(self, generator, outputs, vocab_pointer_switches, context_question_attention, context_question_indices, oov_to_limited_idx=None):
 

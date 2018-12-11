@@ -211,7 +211,7 @@ def get_golden_passage_split(args, split):
     # the output format of an example is golden_passage\tquery\tanswer
     logger.info('loading preprocessed file...')
     inp_file = os.path.join(args.out_dir, split + '_saved_in_line.txt')
-    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx.txt')
     to_save = []
     with open(inp_file, 'r') as f:
         exs = f.readlines()
@@ -219,8 +219,11 @@ def get_golden_passage_split(args, split):
             passages = ex.split('\t')[0]
             query = ex.split('\t')[1]
             answers = ex.split('\t')[2]
+            query_id = ex.split('\t')[-4]
             _passages = passages.split('#@#')
             _answers = answers.split('#@#')
+            random.shuffle(_passages)
+            random.shuffle(_answers)
             for psg in _passages:
                 parts = psg.split('@@')
                 is_selected = int(parts[0])
@@ -228,7 +231,7 @@ def get_golden_passage_split(args, split):
                 if is_selected == 1:
                     for anw in _answers:
                         if anw.strip():
-                            to_save.append('\t'.join((content, query, anw, '\n')))
+                            to_save.append('\t'.join((content, query, anw, query_id, '\n')))
     with open(out_file, 'w') as f:
         f.writelines(to_save)
 
@@ -280,13 +283,34 @@ def get_golden_other_passage_split(args, split):
         f.writelines(to_save)
     print('In '+split+' dataset, the count_golden_passage is %d, and the count_other_passage is %d', count_golden_passage, count_other_passage)
 
+def format_dev(args, split):
+    # get the evaluation format.
+    logger.info('loading ' + split + 'file...')
+    inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
+    out_file = os.path.join(args.out_dir, split + '_reference.txt')
+    to_save = []
+    with open(inp_file, 'r') as f:
+        answer_dict = {}
+        content = json.load(f)
+        idxs = content['passages'].keys()
+        for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):    
+
+            answers = content['answers'][idx]
+            answer_dict['query_id'] = str(content['query_id'][idx])
+            answer_dict['answers'] = answers
+
+            to_save.append(json.dumps(answer_dict)+'\n')
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
+
 def main():
     # format_file(args)
     # count_is_selected(args)
     # get_correct_answer(args)
     # count_length_distribution()
     # get_golden_passage(args)
-    get_golden_other_passage(args)
+    # get_golden_other_passage(args)
+    format_dev(args, 'dev')
 
 
 if __name__ == '__main__':
