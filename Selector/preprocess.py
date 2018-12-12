@@ -303,6 +303,39 @@ def format_dev(args, split):
     with open(out_file, 'w') as f:
         f.writelines(to_save)
 
+def format_dev_1(args, split):
+    # get a inference format。
+    # each sample consists of 10 paragraphs followed by questions and answers. 
+    logger.info('loading ' + split + 'file...')
+    inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
+    out_file = os.path.join(args.out_dir, split + '_inference_passage10_query_answer.txt')
+    to_save = []
+    with open(inp_file, 'r') as f:
+        content = json.load(f)
+        idxs = content['passages'].keys()
+        for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):    
+            psg = ''
+            passages = content['passages'][idx][:10]
+            if len(passages) < 10:
+                diff = 10 - len(passages)
+                while diff>0:
+                    passages.append({'passage_text':'apple', 'is_selected':0})
+                    diff -= 1
+            assert len(passages) == 10
+            for passage in passages:
+                psg += passage['passage_text']
+                psg += '#@#'
+            
+            ans = ''
+            answers = content['answers'][idx]
+            for answer in answers:
+                ans += answer.replace('\n', '')
+                ans += '#@#'
+
+            to_save.append('\t'.join([psg[:-3], content['query'][idx], ans[:-3], str(content['query_id'][idx]), '\n']))
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
+
 def main():
     # format_file(args)
     # count_is_selected(args)
@@ -310,7 +343,8 @@ def main():
     # count_length_distribution()
     # get_golden_passage(args)
     # get_golden_other_passage(args)
-    format_dev(args, 'dev')
+    # format_dev(args, 'dev')
+    format_dev_1(args, 'dev')
 
 
 if __name__ == '__main__':

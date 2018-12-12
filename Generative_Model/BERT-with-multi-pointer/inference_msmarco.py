@@ -55,41 +55,41 @@ class MarcoExample(object):
     """A single training/test example for simple sequence classification."""
 
     def __init__(self,
-                 passage_text,
+                 passages_text,
                  query_text,
-                 answer_text,
-                 example_id=None):
-        self.passage_text = passage_text
+                 answers_text,
+                 query_id=None):
+        self.passages_text = passages_text
         self.query_text = query_text
-        self.answer_text = answer_text
-        self.example_id = example_id
+        self.answers_text = answers_text
+        self.query_id = query_id
 
-    def __str__(self):
-        return self.__repr__()
+    # def __str__(self):
+    #     return self.__repr__()
 
-    def __repr__(self):
-        s = ""
-        if self.example_id:
-            s += "qas_id: %s" % (tokenization.printable_text(self.example_id))
-        s += ", passage_text: %s" % (tokenization.printable_text(self.passage_text))
-        s += ", query_text: %s" % (tokenization.printable_text(self.query_text))
-        s += ", answer_text: %s" % (tokenization.printable_text(self.answer_text))
-        return s
+    # def __repr__(self):
+    #     s = ""
+    #     if self.example_id:
+    #         s += "qas_id: %s" % (tokenization.printable_text(self.example_id))
+    #     s += ", passage_text: %s" % (tokenization.printable_text(self.passage_text))
+    #     s += ", query_text: %s" % (tokenization.printable_text(self.query_text))
+    #     s += ", answer_text: %s" % (tokenization.printable_text(self.answer_text))
+    #     return s
 
 class InputFeatures(object):
     """A single set of features of data."""
 
     def __init__(self,
-                 example_id,
-                 input_ids,
-                 input_mask,
-                 segment_ids,
+                 query_id,
+                 inputs_ids,
+                 inputs_mask,
+                 segments_ids,
                  answer_ids=None,
                  answer_mask=None):
-        self.example_id = example_id
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
+        self.query_id = query_id
+        self.inputs_ids = inputs_ids
+        self.inputs_mask = inputs_mask
+        self.segments_ids = segments_ids
         self.answer_ids = answer_ids
         self.answer_mask = answer_mask
 
@@ -101,42 +101,54 @@ def read_msmarco_examples(input_file, is_training):
         if is_training:
             data = data
         else:
-            data = data[:16666]
+            data = data
     
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
             return True
         return False
 
-    examples = []
-    for sample in data:
-        sample = sample.split('\t')[:-1] # a list of passage, query, answer and maybe an id
-        tokens_lists = [[] for _ in range(len(sample))]
-        for idx, item in enumerate(sample):
+    def remove_whitespace(text_list, tokens_lists):
+        for idx, item in enumerate(text_list):
             prev_is_whitespace = True
             for c in item:
                 if is_whitespace(c):
                     prev_is_whitespace = True
                 else:
                     if prev_is_whitespace:
+                        # print('idx is ', idx)
+                        # print('tokens_lists is ', tokens_lists)
                         tokens_lists[idx].append(c)
                     else:
                         tokens_lists[idx][-1] += c
                     prev_is_whitespace = False
 
-        if len(tokens_lists) == 3:
-            passage_text, query_text, answer_text = [' '.join(tokens_list) for tokens_list in tokens_lists]
-            example = MarcoExample(                
-                passage_text=passage_text,
-                query_text=query_text,
-                answer_text=answer_text)
-        elif len(tokens_lists) == 4:
-            passage_text, query_text, answer_text, example_id = [' '.join(tokens_list) for tokens_list in tokens_lists]
-            example = MarcoExample(                
-                passage_text=passage_text,
-                query_text=query_text,
-                answer_text=answer_text,
-                example_id=example_id)
+    examples = []
+    for sample in data:
+        sample = sample.split('\t')[:-1] # a list of passages, query, answer and maybe an id
+       
+        passages = sample[0].split('#@#')
+        query = [sample[1]]
+        answers = sample[2].split('#@#')
+        query_id = int(sample[3])
+
+        tokens_ps = [[] for _ in range(len(passages))]
+        tokens_q = [[]]
+        tokens_as = [[] for _ in range(len(answers))]
+
+        remove_whitespace(passages, tokens_ps)
+        remove_whitespace(query, tokens_q)
+        remove_whitespace(answers, tokens_as)
+
+        passages_text = [' '.join(tokens_p) for tokens_p in tokens_ps]
+        query_text = ' '.join(tokens_q[0])
+        answers_text = [' '.join(tokens_a) for tokens_a in tokens_as]
+
+        example = MarcoExample(                
+            passages_text=passages_text,
+            query_text=query_text,
+            answers_text=answers_text,
+            query_id=query_id)
 
         examples.append(example)
     return examples
@@ -148,79 +160,148 @@ def convert_examples_to_features(examples, tokenizer, p_max_length,
 
     features = []
     for example in examples:
-        sample = [example.passage_text, example.query_text, example.answer_text, example.example_id]
-        example_id = None
-        if len(sample) == 4:
-            example_id = sample[-1]
-            sample = sample[:-1]
-        tokens = [tokenizer.tokenize(item) for item in sample] 
-        passage_tokens, query_tokens, answer_tokens = tokens 
+        # sample = [example.passages_text, example.query_text, example.answers_text, example.query_id]
+
+        passages_tokens = [tokenizer.tokenize(passage_text) for passage_text in example.passages_text]
+        query_tokens = tokenizer.tokenize(example.query_text)
+        answers_tokens = [tokenizer.tokenize(answer_text) for answer_text in example.answers_text] 
+        query_id = example.query_id
+        # tokens = [tokenizer.tokenize(item) for item in sample] 
+        # passage_tokens, query_tokens, answer_tokens = tokens 
         
-        passage_tokens = passage_tokens[:p_max_length]
+        passages_tokens = [passage_tokens[:p_max_length] for passage_tokens in passages_tokens]
         query_tokens = query_tokens[:q_max_length]
-        answer_tokens = answer_tokens[:a_max_length]
+        answers_tokens = [answer_tokens[:a_max_length] for answer_tokens in answers_tokens]
 
-        tokens = []
-        segment_ids = []
-        # Add query to the tokens
-        tokens.append("[CLS]")
-        segment_ids.append(0)
-        for token in query_tokens:
-            tokens.append(token)
+        inputs_ids = []
+        inputs_mask = []
+        segments_ids = []
+        for passage_tokens in passages_tokens:
+            tokens = []
+            segment_ids = []
+            tokens.append("[CLS]")
             segment_ids.append(0)
-        tokens.append("[SEP]")
-        segment_ids.append(0)
-        # Add Passage tp the tokens
-        for token in passage_tokens:
-            tokens.append(token)
+            for token in query_tokens:
+                tokens.append(token)
+                segment_ids.append(0)
+            tokens.append("[SEP]")
+            segment_ids.append(0)
+            # Add Passage tp the tokens
+            for token in passage_tokens:
+                tokens.append(token)
+                segment_ids.append(1)
+            tokens.append("[SEP]")
             segment_ids.append(1)
-        tokens.append("[SEP]")
-        segment_ids.append(1)
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1] * len(input_ids)
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real
+            # tokens are attended to.
+            input_mask = [1] * len(input_ids)
 
-        # Zero-pad up to the sequence length.
-        max_seq_length = p_max_length + q_max_length + 3
-        while len(input_ids) < max_seq_length:
-            input_ids.append(0)
-            input_mask.append(0)
-            segment_ids.append(0)
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
+            # Zero-pad up to the sequence length.
+            max_seq_length = p_max_length + q_max_length + 3
+            while len(input_ids) < max_seq_length:
+                input_ids.append(0)
+                input_mask.append(0)
+                segment_ids.append(0)
+            assert len(input_ids) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
+            inputs_ids.append(input_ids)
+            inputs_mask.append(input_mask)
+            segments_ids.append(segment_ids)
 
-        tokens = []
-        # Add answer to the tokens
-        tokens.append("[CLS]")
-        for token in answer_tokens:
-            tokens.append(token)
-        tokens.append("[SEP]")
-        answer_ids = tokenizer.convert_tokens_to_ids(tokens)
+        for answer_tokens in answers_tokens:
+            tokens = []
+            # Add answer to the tokens
+            tokens.append("[CLS]")
+            for token in answer_tokens:
+                tokens.append(token)
+            tokens.append("[SEP]")
+            answer_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        answer_mask = [1] * len(answer_ids)
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real
+            # tokens are attended to.
+            answer_mask = [1] * len(answer_ids)
 
-        # Zero-pad up to the sequence length.
-        max_seq_length = a_max_length + 2
-        while len(answer_ids) < max_seq_length:
-            answer_ids.append(0)
-            answer_mask.append(0)
+            # Zero-pad up to the sequence length.
+            max_seq_length = a_max_length + 2
+            while len(answer_ids) < max_seq_length:
+                answer_ids.append(0)
+                answer_mask.append(0)
 
-        assert len(answer_ids) == max_seq_length
-        assert len(answer_mask) == max_seq_length
-
-        features.append(
-            InputFeatures(
-                example_id=example_id,
-                input_ids=input_ids,
-                input_mask=input_mask,
-                segment_ids=segment_ids,
+            assert len(answer_ids) == max_seq_length
+            assert len(answer_mask) == max_seq_length
+            features.append(
+                InputFeatures(
+                query_id=query_id,
+                inputs_ids=inputs_ids,
+                inputs_mask=inputs_mask,
+                segments_ids=segments_ids,
                 answer_ids=answer_ids,
                 answer_mask=answer_mask))
+
+        # tokens = []
+        # segment_ids = []
+        # # Add query to the tokens
+        # tokens.append("[CLS]")
+        # segment_ids.append(0)
+        # for token in query_tokens:
+        #     tokens.append(token)
+        #     segment_ids.append(0)
+        # tokens.append("[SEP]")
+        # segment_ids.append(0)
+        # # Add Passage tp the tokens
+        # for token in passage_tokens:
+        #     tokens.append(token)
+        #     segment_ids.append(1)
+        # tokens.append("[SEP]")
+        # segment_ids.append(1)
+        # input_ids = tokenizer.convert_tokens_to_ids(tokens)
+
+        # # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # # tokens are attended to.
+        # input_mask = [1] * len(input_ids)
+
+        # # Zero-pad up to the sequence length.
+        # max_seq_length = p_max_length + q_max_length + 3
+        # while len(input_ids) < max_seq_length:
+        #     input_ids.append(0)
+        #     input_mask.append(0)
+        #     segment_ids.append(0)
+        # assert len(input_ids) == max_seq_length
+        # assert len(input_mask) == max_seq_length
+        # assert len(segment_ids) == max_seq_length
+
+        # tokens = []
+        # # Add answer to the tokens
+        # tokens.append("[CLS]")
+        # for token in answer_tokens:
+        #     tokens.append(token)
+        # tokens.append("[SEP]")
+        # answer_ids = tokenizer.convert_tokens_to_ids(tokens)
+
+        # # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # # tokens are attended to.
+        # answer_mask = [1] * len(answer_ids)
+
+        # # Zero-pad up to the sequence length.
+        # max_seq_length = a_max_length + 2
+        # while len(answer_ids) < max_seq_length:
+        #     answer_ids.append(0)
+        #     answer_mask.append(0)
+
+        # assert len(answer_ids) == max_seq_length
+        # assert len(answer_mask) == max_seq_length
+
+        # features.append(
+        #     InputFeatures(
+        #         example_id=example_id,
+        #         input_ids=input_ids,
+        #         input_mask=input_mask,
+        #         segment_ids=segment_ids,
+        #         answer_ids=answer_ids,
+        #         answer_mask=answer_mask))
     return features
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -458,13 +539,12 @@ def main():
         q_max_length=Q_MAX_LENGTH,
         a_max_length=A_MAX_LENGTH)
 
-    eval_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    eval_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    eval_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+    eval_input_ids = torch.tensor([f.inputs_ids for f in eval_features], dtype=torch.long)
+    eval_input_mask = torch.tensor([f.inputs_mask for f in eval_features], dtype=torch.long)
+    eval_segment_ids = torch.tensor([f.segments_ids for f in eval_features], dtype=torch.long)
     eval_answer_ids = torch.tensor([f.answer_ids for f in eval_features], dtype=torch.long)
     eval_answer_mask = torch.tensor([f.answer_mask for f in eval_features], dtype=torch.long)
-    # eval_example_id = torch.tensor([int(f.example_id) for f in eval_features], dtype=torch.long)
-    eval_example_id = torch.tensor([int(0) for f in eval_features], dtype=torch.long)
+    eval_example_id = torch.tensor([f.query_id for f in eval_features], dtype=torch.long)
 
     eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_answer_ids, eval_answer_mask, eval_example_id)
 
@@ -608,7 +688,7 @@ def main():
         model.eval()
         logger.info("Start evaluating")
         to_save = []
-        for input_ids, input_mask, segment_ids, answer_ids, answer_mask, example_id in tqdm(eval_dataloader, desc="Evaluating"):
+        for input_ids, input_mask, segment_ids, answer_ids, answer_mask, query_ids in tqdm(eval_dataloader, desc="Evaluating"):
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
@@ -617,10 +697,7 @@ def main():
             with torch.no_grad():
 
                 def decode_to_vocab(batch, isContext=False):
-                    with torch.cuda.device_of(batch):
-                        batch = batch.tolist()
-                    batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch]
-                    
+
                     def trim(s, t):
                         sentence = []
                         for w in s:
@@ -628,15 +705,18 @@ def main():
                                 break
                             sentence.append(w)
                         return sentence
-
-                    batch = [trim(ex, '[SEP]') for ex in batch]
-
+                
                     def filter_special(tok):
                         return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]', '[EOS]']
+                    
+                    batch_dim = batch.dim()
+                    with torch.cuda.device_of(batch):
+                        batch = batch.tolist()
+                    batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch] if batch_dim == 2 else [[[idx_to_vocab[ind] for ind in ex]for ex in sample] for sample in batch]
+                    batch = [trim(ex, '[SEP]') for ex in batch] if batch_dim == 2 else [[trim(ex, '[SEP]') for ex in sample] for sample in batch]
+                    batch = [filter(filter_special, ex) for ex in batch] if batch_dim ==2 else [[filter(filter_special, ex) for ex in sample] for sample in batch]
 
-                    batch = [filter(filter_special, ex) for ex in batch]
-
-                    return [' '.join(ex) if ex != None else '' for ex in batch]
+                    return [' '.join(ex) if ex != None else '' for ex in batch] if batch_dim ==2 else [[' '.join(ex) if ex != None else '' for ex in sample] for sample in batch]
 
                 loss, outs = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
                 if type(outs) == tuple:
@@ -656,12 +736,23 @@ def main():
         #             answer_dict['query_id'] = str(answer_idx)
         #             answer_dict['answers'] = [answer_text]
         #             to_save.append(json.dumps(answer_dict) + "\n")
-                for i, (answer, ground_trurh, answer_score) in enumerate(zip(decode_answers, ground_trurhs, answer_scores)):
+                query_ids = query_ids.tolist()
+                for i, (answer, ground_trurh, answer_score, query_id) in enumerate(zip(decode_answers, ground_trurhs, answer_scores, query_ids)):
                     # print('context is:\n', context.replace(" ##", ""))
                     # print('ground truth is:\n', ground_trurh.replace(" ##", ""))
                     # print('answer is:\n', answer.replace(" ##", ""))
-                    answer_length = len(answer.split(' '))
-                    to_save.append('\t'.join([ground_trurh.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
+                    if outs.dim() == 3:
+                        for ans, ans_score in zip(answer, answer_score):
+                            answer_length = len(ans.split(' '))
+                            # print('query_id is ', query_id)
+                            # print('ans_score is ', ans_score)
+                            # print('ground_trurh is ', ground_trurh)
+                            # print('ans is ', ans)
+                            
+                            to_save.append('\t'.join([str(query_id), ground_trurh.replace(" ##", ""), ans.replace(" ##", ""), str(1.*ans_score[0]/answer_length), '\n']))
+                    else:
+                        answer_length = len(answer.split(' '))
+                        to_save.append('\t'.join([query_id, ground_trurh.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
 
         output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
         with open(output_answer_file, "w") as f:

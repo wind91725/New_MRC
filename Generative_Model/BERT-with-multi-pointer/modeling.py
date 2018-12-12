@@ -561,8 +561,17 @@ class BertWithMultiPointer(nn.Module):
         self.out = nn.Linear(decoder_dim, self.vocab_size)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
-        all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
+        
+        self.reshape = False
+        if input_ids.dim() == 3:
+            self.ori_size = input_ids.size()
+            new_size = (-1, self.ori_size[-1])
+            input_ids = input_ids.view(new_size)
+            token_type_ids = token_type_ids.view(new_size)
+            attention_mask = attention_mask.view(new_size)
+            self.reshape = True
 
+        all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
         sequence_output = all_encoder_layers[-1]
         sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.reduce_dim>0 else sequence_output
         
@@ -599,12 +608,14 @@ class BertWithMultiPointer(nn.Module):
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1), position=t)
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.reduce_dim>0 else embedding
+            
             hiddens[0][:, t] = hiddens[0][:, t] + embedding.squeeze(1)
             for l in range(len(self.self_attentive_decoder.layers)):
                 hiddens[l + 1][:, t] = self.self_attentive_decoder.layers[l].feedforward(
                     self.self_attentive_decoder.layers[l].attention(
                     self.self_attentive_decoder.layers[l].selfattn(hiddens[l][:, t], hiddens[l][:, :t+1], hiddens[l][:, :t+1])
                   , self_attended_context, self_attended_context))
+            
             decoder_outputs = self.dual_ptr_rnn_decoder(hiddens[-1][:, t].unsqueeze(1), self_attended_context)
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
             
@@ -618,6 +629,8 @@ class BertWithMultiPointer(nn.Module):
             outs[:, t] = preds.cpu()
             if eos_yet.all():
                 break
+        if self.reshape:
+            return outs.view((self.ori_size[0], self.ori_size[1], -1)), answer_scores.view((self.ori_size[0], self.ori_size[1], -1))
         return outs, answer_scores
 
     def probs(self, generator, outputs, vocab_pointer_switches, context_question_attention, context_question_indices, oov_to_limited_idx=None):
