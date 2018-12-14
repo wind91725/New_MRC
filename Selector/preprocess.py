@@ -1,13 +1,16 @@
 # python preprocess.py --inp_dir /raid/ltj/MRC/MSMARCO --out_dir /raid/ltj/MRC/MSMARCO/preprocessed
 
 import os
+import re
 import json
+import string
 import logging
 import argparse
 import random
 import numpy as np
 from tqdm import tqdm
 from itertools import groupby
+from multiprocessing import Process, Pool
 
 logger = logging.getLogger()
 
@@ -336,6 +339,201 @@ def format_dev_1(args, split):
     with open(out_file, 'w') as f:
         f.writelines(to_save)
 
+def my_lcs(string, sub):
+    """
+    Calculates longest common subsequence for a pair of tokenized strings
+    :param string : list of str : tokens from a string split using whitespace
+    :param sub : list of str : shorter string, also split using whitespace
+    :returns: length (list of int): length of the longest common subsequence between the two strings
+
+    Note: my_lcs only gives length of the longest common subsequence, not the actual LCS
+    """
+    if(len(string)< len(sub)):
+        sub, string = string, sub
+
+    lengths = [[0 for i in range(0,len(sub)+1)] for j in range(0,len(string)+1)]
+
+    for j in range(1,len(sub)+1):
+        for i in range(1,len(string)+1):
+            if(string[i-1] == sub[j-1]):
+                lengths[i][j] = lengths[i-1][j-1] + 1
+            else:
+                lengths[i][j] = max(lengths[i-1][j] , lengths[i][j-1])
+
+    return lengths[len(string)][len(sub)]
+
+def normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+    def remove_articles(text):
+        return re.sub(r'\b(a|an|the)\b', ' ', text)
+
+    def white_space_fix(text):
+        return ' '.join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def len_preserved_normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+
+    def len_preserved_space(matchobj):
+        return ' ' * len(matchobj.group(0))
+
+    def remove_articles(text):
+        return re.sub(r'\b(a|an|the)\b', len_preserved_space, text)
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch if ch not in exclude else " " for ch in text)
+
+    def lower(text):
+        return text.lower()
+
+    return remove_articles(remove_punc(lower(s)))
+
+def rate_rougeL_of_passage(passage, answer):
+    if passage == "unknown":
+        return "__NA__", -1, -1
+
+    if normalize_answer(answer) == "yes":
+        return -1, '__YES__'
+    if normalize_answer(answer) == "no":
+        return -1, '__NO__'
+
+    passage_ls = len_preserved_normalize_answer(passage).split()
+    answer_ls = len_preserved_normalize_answer(answer).split()
+
+    max_rougeL = 0.0
+    fake_answer = 'fake_answer'
+    beta = 1.2
+    for i in range(len(answer_ls)-1):
+        for j in range(i+1, len(answer_ls)):
+            _answer_ls = answer_ls[i:j]
+            lcs = my_lcs(_answer_ls, passage_ls)
+            prec = lcs/float(len(answer_ls))
+            rec = lcs/float(len(_answer_ls))
+            if prec == 0 or rec == 0:
+                continue
+            rougeL = ((1 + beta**2)*prec*rec)/float(rec + beta**2*prec)
+            if rougeL > max_rougeL:
+                max_rougeL = rougeL
+                fake_answer = ' '.join(_answer_ls)
+
+    return max_rougeL, fake_answer
+
+def process_sample(sample):
+    # get rougeL of each passage.
+    query, answer, passages = sample
+    ret = {}
+    ret['query'] = query
+    ret['answer'] = answer
+    ret['passages'] = []
+    for passage in passages:
+        passage_text = passage['passage_text']
+        passage_label = passage['is_selected']
+        rougel_score, fake_answer = rate_rougeL_of_passage(passage_text, answer)
+        psg = '#@#'.join([passage_text, str(passage_label), fake_answer, str(rougel_score)])
+        ret['passages'].append(psg)
+    return json.dumps(ret)
+
+def get_rougeL_multiprocess(args, split):
+    # get rougeL of each passage.
+    logger.info('loading ' + split + 'file...')
+    inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
+    out_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer.txt')
+    pool = Pool(processes=16)
+    to_save = []
+    with open(inp_file, 'r') as f:
+        content = json.load(f)
+        idxs = content['passages'].keys()
+        idxs = [idx for idx in idxs]
+        for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):  
+            query = content['query'][idx]
+            answer = content['answers'][idx][0]
+            passages = content['passages'][idx]
+            sample = (query, answer, passages)
+            to_save.append(pool.apply_async(process_sample, (sample,)))
+        pool.close()
+        pool.join()
+    to_save = [item.get()+'\n' for item in to_save]    
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
+
+def get_nagetive_sample(args, split):
+    # get rougeL of each passage.
+    logger.info('loading ' + split + 'file...')
+    inp_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer.txt')
+    out_file = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_answerable_sample.txt')
+    to_save = []
+    with open(inp_file) as f:
+        samples = f.readlines()
+        for sample in tqdm(samples, ascii = True, desc = 'progress report:'):
+            sample = json.loads(sample)
+            query = sample['query']
+            answer = sample['answer']
+            passages = sample['passages']
+            if answer == 'No Answer Present.':
+                continue
+            min_score = 1.
+            candidate_passage = ''
+            random.shuffle(passages)
+            for passage in passages:
+                passage, is_selected, fake_answer, rouge_score = passage.split('#@#')
+                rouge_score, is_selected = float(rouge_score), int(is_selected)
+                if is_selected == 0 and rouge_score < min_score:
+                    candidate_passage = passage
+                    min_score = rouge_score
+            to_save.append('\t'.join([candidate_passage, query, 'No Answer Present.', '\n']))
+    with open(out_file, 'w') as f:
+        f.writelines(to_save)
+
+def statistic_yes_no(args, split):
+    logger.info('loading ' + split + 'file...')
+    inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
+    total_num = 0
+    start_dict = {}   
+    with open(inp_file, 'r') as f:
+        content = json.load(f)
+    idxs = content['passages'].keys()
+    for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):  
+        query = content['query'][idx]
+        answers = content['answers'][idx]
+        passages = content['passages'][idx]
+        for answer in answers:
+            if normalize_answer(answer) == 'yes' or normalize_answer(answer) == 'no':
+                total_num += 1
+                start_dict[query.split()[0].lower()] = start_dict.get(query.split()[0].lower(), 0) + 1
+                break
+    _start_dict = {}
+    for key in start_dict.keys():
+        if start_dict[key] > 100:
+            _start_dict[key] = start_dict[key]
+    print('_start_dict is', _start_dict)
+    print('total_num is', total_num)
+    start_words = [word for word in _start_dict.keys()].append('would')
+    start_with_start_words = 0
+    start_with_start_words_yes_no = 0
+    for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):  
+        query = content['query'][idx]
+        answers = content['answers'][idx]
+        passages = content['passages'][idx]
+        start_word = query.split()[0].lower()
+        if start_word in start_words:
+            start_with_start_words += 1
+            for answer in answers:
+                if normalize_answer(answer).startswith('yes') or normalize_answer(answer).startswith('no'):
+                    start_with_start_words_yes_no += 1
+                    break
+    print('start_with_start_words is', start_with_start_words)
+    print('start_with_start_words_yes_no is', start_with_start_words_yes_no)
+
+
 def main():
     # format_file(args)
     # count_is_selected(args)
@@ -344,7 +542,11 @@ def main():
     # get_golden_passage(args)
     # get_golden_other_passage(args)
     # format_dev(args, 'dev')
-    format_dev_1(args, 'dev')
+    # format_dev_1(args, 'dev')
+    # get_rougeL(args, 'dev')
+    # get_rougeL_multiprocess(args, 'train')
+    get_nagetive_sample(args, 'train')
+    # statistic_yes_no(args, 'train')
 
 
 if __name__ == '__main__':
