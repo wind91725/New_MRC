@@ -365,7 +365,9 @@ def main():
     parser.add_argument('--postfix',
                         default='',
                         help='the name of log file to be saved.')
-
+    parser.add_argument('--share_input_output_embed', 
+                        default=False, action='store_true',
+                        help='share input and output embeddings of decoder.')
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -409,6 +411,7 @@ def main():
     bert_config = BertConfig.from_json_file(args.bert_config_file)
     bert_config.reduce_dim = args.reduce_dim
     bert_config.decoder_layer = args.decoder_layer
+    bert_config.share_embedd = args.share_input_output_embed
 
     if args.max_seq_length > bert_config.max_position_embeddings:
         raise ValueError(
@@ -471,6 +474,9 @@ def main():
     # Prepare model
     # model = BertForQuestionAnswering(bert_config)
     model = BertWithMultiPointer(bert_config)
+
+    # print('state_dict is\n', [k for k in model.state_dict().keys()])
+    # exit(0)
     if args.init_checkpoint is not None:
         print('Loading the pre-trained BERT parameters')
         state_dict = torch.load(args.init_checkpoint, map_location='cpu')

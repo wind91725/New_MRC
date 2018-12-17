@@ -528,13 +528,15 @@ class BertWithMultiPointer(nn.Module):
     """
     def __init__(self, config):
         super(BertWithMultiPointer, self).__init__()
+        self.reduce_dim = config.reduce_dim
+        self.decoder_layer = config.decoder_layer
+        self.share_decoder_embedd = config.share_embedd
         self.bert = BertModel(config)
         # TODO check with Google if it's normal there is no dropout on the token classifier of SQuAD in the TF version
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.qa_outputs = nn.Linear(config.hidden_size, 2)
         self.decoderEmbedding = BERTEmbeddings(config)
-        self.reduce_dim = config.reduce_dim
-        self.decoder_layer = config.decoder_layer
+
         def init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 # Slightly different from the TF version which uses truncated_normal for initialization
@@ -559,6 +561,9 @@ class BertWithMultiPointer(nn.Module):
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(decoder_dim, decoder_dim, dropout=0.2)
         self.vocab_size = config.vocab_size
         self.out = nn.Linear(decoder_dim, self.vocab_size)
+        if self.share_decoder_embedd:
+            self.project = nn.Linear(decoder_dim, config.hidden_size)
+            self.out.weight = self.decoderEmbedding.word_embeddings.weight
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         
@@ -638,6 +643,8 @@ class BertWithMultiPointer(nn.Module):
         size = list(outputs.size())
 
         size[-1] = self.vocab_size
+        if self.share_decoder_embedd:
+            outputs = self.project(outputs)
         scores = generator(outputs.view(-1, outputs.size(-1))).view(size)
         p_vocab = F.softmax(scores, dim=scores.dim()-1)
         scaled_p_vocab = vocab_pointer_switches.expand_as(p_vocab) * p_vocab

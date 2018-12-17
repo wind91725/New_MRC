@@ -51,6 +51,7 @@ def format_split(args, split):
             # if len(content['answers'][idx]) > 1:
             #     print(content['answers'][idx])
             #     break
+
             answers = content['answers'][idx]
             for answer in answers:
                 ans += answer.replace('\n', '')
@@ -213,8 +214,8 @@ def get_golden_passage(args):
 def get_golden_passage_split(args, split):
     # the output format of an example is golden_passage\tquery\tanswer
     logger.info('loading preprocessed file...')
-    inp_file = os.path.join(args.out_dir, split + '_saved_in_line.txt')
-    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx.txt')
+    inp_file = os.path.join(args.inp_dir, split + '_saved_in_line.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx_full.txt')
     to_save = []
     with open(inp_file, 'r') as f:
         exs = f.readlines()
@@ -223,8 +224,13 @@ def get_golden_passage_split(args, split):
             query = ex.split('\t')[1]
             answers = ex.split('\t')[2]
             query_id = ex.split('\t')[-4]
+            wellFormedAnswers = ex.split('\t')[-5]
+            if wellFormedAnswers == '"[]"':
+                # continue
+                _answers = answers.split('#@#')
+            else:
+                _answers = json.loads(wellFormedAnswers) #.split('#@#')
             _passages = passages.split('#@#')
-            _answers = answers.split('#@#')
             random.shuffle(_passages)
             random.shuffle(_answers)
             for psg in _passages:
@@ -289,17 +295,18 @@ def get_golden_other_passage_split(args, split):
 def format_dev(args, split):
     # get the evaluation format.
     logger.info('loading ' + split + 'file...')
-    inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
-    out_file = os.path.join(args.out_dir, split + '_reference.txt')
+    inp_file = os.path.join(args.inp_dir, 'predictions.txt.golden_other.tr50W2dev16K.self_attn_2.half_dim.eval_format.intermidiate_ref')
+    out_file = os.path.join(args.out_dir, split + '_reference_intermidiate.txt')
     to_save = []
     with open(inp_file, 'r') as f:
-        answer_dict = {}
-        content = json.load(f)
-        idxs = content['passages'].keys()
-        for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):    
+        for l in f:
+            answer_dict = {}
+            content = json.loads(l)
+            # idxs = content['passages'].keys()
+            # for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):    
 
-            answers = content['answers'][idx]
-            answer_dict['query_id'] = str(content['query_id'][idx])
+            answers = content['answers']# [idx]
+            answer_dict['query_id'] = str(content['query_id']) #[idx])
             answer_dict['answers'] = answers
 
             to_save.append(json.dumps(answer_dict)+'\n')
@@ -446,7 +453,7 @@ def get_rougeL_multiprocess(args, split):
     # get rougeL of each passage.
     logger.info('loading ' + split + 'file...')
     inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
-    out_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer.txt')
+    out_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_wellFormed.txt')
     pool = Pool(processes=16)
     to_save = []
     with open(inp_file, 'r') as f:
@@ -455,7 +462,11 @@ def get_rougeL_multiprocess(args, split):
         idxs = [idx for idx in idxs]
         for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):  
             query = content['query'][idx]
-            answer = content['answers'][idx][0]
+            answer = content['wellFormedAnswers'][idx]
+            if answer == '[]':
+                continue
+                # answer = content['answers'][idx][0]
+            answer = answer[0]
             passages = content['passages'][idx]
             sample = (query, answer, passages)
             to_save.append(pool.apply_async(process_sample, (sample,)))
@@ -468,8 +479,8 @@ def get_rougeL_multiprocess(args, split):
 def get_nagetive_sample(args, split):
     # get rougeL of each passage.
     logger.info('loading ' + split + 'file...')
-    inp_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer.txt')
-    out_file = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_answerable_sample.txt')
+    inp_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_wellFormed.txt')
+    out_file = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_wellFormed_sample.txt')
     to_save = []
     with open(inp_file) as f:
         samples = f.readlines()
@@ -478,8 +489,8 @@ def get_nagetive_sample(args, split):
             query = sample['query']
             answer = sample['answer']
             passages = sample['passages']
-            if answer == 'No Answer Present.':
-                continue
+            # if answer == 'No Answer Present.':
+            #     continue
             min_score = 1.
             candidate_passage = ''
             random.shuffle(passages)
@@ -544,8 +555,8 @@ def main():
     # format_dev(args, 'dev')
     # format_dev_1(args, 'dev')
     # get_rougeL(args, 'dev')
-    # get_rougeL_multiprocess(args, 'train')
-    get_nagetive_sample(args, 'train')
+    get_rougeL_multiprocess(args, 'dev')
+    # get_nagetive_sample(args, 'train')
     # statistic_yes_no(args, 'train')
 
 
