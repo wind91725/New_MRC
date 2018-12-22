@@ -93,15 +93,17 @@ class InputFeatures(object):
         self.answer_ids = answer_ids
         self.answer_mask = answer_mask
 
-def read_msmarco_examples(input_file, is_training):
+def read_msmarco_examples(args, input_file, is_training):
     """Read a SQuAD json file into a list of SquadExample."""
     with open(input_file, "r") as f:
         data = f.readlines()
         random.shuffle(data)
         if is_training:
-            data = data
+            num_batch = len(data)//args.train_batch_size
+            data = data[:num_batch*args.train_batch_size]
         else:
-            data = data[:16666]
+            num_batch = len(data)//args.predict_batch_size
+            data = data[:num_batch*args.predict_batch_size]
     
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -123,6 +125,8 @@ def read_msmarco_examples(input_file, is_training):
                     else:
                         tokens_lists[idx][-1] += c
                     prev_is_whitespace = False
+        # print('tokens_lists length is:', len(tokens_lists))
+        # exit(0)
 
         if len(tokens_lists) == 3:
             passage_text, query_text, answer_text = [' '.join(tokens_list) for tokens_list in tokens_lists]
@@ -249,7 +253,7 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         param_opti.grad.data.copy_(param_model.grad.data)
     return is_nan
 
-def eval_the_model(args, model, eval_data):
+def eval_the_model(args, model, eval_data, device, criterion):
     if args.local_rank == -1:
         eval_sampler = RandomSampler(eval_data)
     else:
@@ -261,12 +265,19 @@ def eval_the_model(args, model, eval_data):
     n_gpu = torch.cuda.device_count()
 
     for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
-        if n_gpu == 1:
-            batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
+        # if n_gpu == 1:
+        batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
 
         input_ids, input_mask, segment_ids, answer_ids, answer_mask, example_id = batch
-        loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-
+        # loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        pred = []
+        target = []
+        model_ret = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        for item in model_ret:
+            pred.append(item[0][0].log())
+            target.append(item[0][1])
+        target = torch.cat(target)
+        loss = criterion(pred, target)
         eval_loss += loss.mean().detach().cpu()
         eval_batch += 1
     eval_loss /= eval_batch
@@ -431,7 +442,7 @@ def main():
     num_train_steps = None
     if args.do_train:
         print('Preprocess the train dataset.')
-        train_examples = read_msmarco_examples(
+        train_examples = read_msmarco_examples(args,
             input_file=args.train_file, is_training=True)
         num_train_steps = int(
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
@@ -452,7 +463,7 @@ def main():
                                    train_answer_ids, train_answer_mask)
     
     print('Preprocess the dev dataset.')
-    eval_examples = read_msmarco_examples(
+    eval_examples = read_msmarco_examples(args,
         input_file=args.predict_file, is_training=False)
     eval_features = convert_examples_to_features(
         examples=eval_examples,
@@ -507,7 +518,10 @@ def main():
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank)
     elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        # model = torch.nn.DataParallel(model)
+        model = DataParallelModel(model)
+        criterion = DataParallelCriterion(torch.nn.NLLLoss(ignore_index=0))
+
 
     # Prepare optimizer
     if args.fp16:
@@ -532,8 +546,7 @@ def main():
 
     global_step = 0
     if args.do_train:
-
-        eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
+        eval_loss, eval_ppl = eval_the_model(args, model, eval_data, device, criterion)
         best_ppl = eval_ppl
         log_path = os.path.join(args.output_dir, 'log.txt.'+args.postfix)
         with open(log_path, 'w') as f:
@@ -555,7 +568,14 @@ def main():
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
                 input_ids, input_mask, segment_ids, answer_ids, answer_mask = batch
-                loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+                model_ret = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+                pred = []
+                target = []
+                for item in model_ret:
+                    pred.append(item[0][0].log())
+                    target.append(item[0][1])
+                target = torch.cat(target)
+                loss = criterion(pred, target)
 
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
@@ -590,7 +610,7 @@ def main():
 
             train_loss /= train_batch
             train_ppl = math.pow(math.e, train_loss)
-            eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
+            eval_loss, eval_ppl = eval_the_model(args, model, eval_data, device, criterion)
             with open(log_path, 'a') as f:
                 f.write('In epoch-' + str(epoch) + ' the average loss on train set is: ' + str(train_loss.float()) + ' the average ppl on train set is: ' + str(train_ppl))
                 f.write('\n')
@@ -644,7 +664,8 @@ def main():
 
                     return [' '.join(ex) if ex != None else '' for ex in batch]
 
-                loss, outs = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
+                model_ret = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids)
+                outs = model_ret[1]
                 if type(outs) == tuple:
                     outs, answer_scores = outs
                     outs = outs.data
@@ -652,22 +673,9 @@ def main():
                 ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
                 # decode_contexts = decode_to_vocab(input_ids, isContext=True)
-
-        #         example_id = example_id.tolist()
-        #         for answer_idx, answer_text in zip(example_id, decode_answers):
-        #             # print(answer_idx)
-        #             answer_dict = {}
-        #             answer_text = answer_text.replace(" ##", "")
-        #             answer_text = answer_text.replace("##", "")
-        #             answer_dict['query_id'] = str(answer_idx)
-        #             answer_dict['answers'] = [answer_text]
-        #             to_save.append(json.dumps(answer_dict) + "\n")
-                for i, (answer, ground_trurh, answer_score) in enumerate(zip(decode_answers, ground_trurhs, answer_scores)):
-                    # print('context is:\n', context.replace(" ##", ""))
-                    # print('ground truth is:\n', ground_trurh.replace(" ##", ""))
-                    # print('answer is:\n', answer.replace(" ##", ""))
+                for i, (answer, ground_trurh, answer_score, ex_id) in enumerate(zip(decode_answers, ground_trurhs, answer_scores, example_id)):
                     answer_length = len(answer.split(' '))
-                    to_save.append('\t'.join([ground_trurh.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
+                    to_save.append('\t'.join([ground_trurh.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), str(ex_id), '\n']))
 
         output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
         with open(output_answer_file, "w") as f:

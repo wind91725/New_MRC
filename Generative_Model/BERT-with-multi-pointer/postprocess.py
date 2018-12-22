@@ -32,16 +32,16 @@ def format_dev(args, filt_no_answer=True):
     	sample_idx = sample[0].split('\t')[0]
     	max_score = -10000
     	_candidate = {}
-    	_candidate['query_id'] = sample_idx
+    	_candidate['query_id'] = int(sample_idx)
     	_candidate['answers'] = ['no answer present .']
     	for candidate in sample:
-    		idx, ground_truth, prediction, score, _ = candidate.split('\t')
+    		idx, prediction, score, _ = candidate.split('\t')
     		assert idx == sample_idx
     		score = float(score)
     		if score > max_score:
     			if filt_no_answer and prediction == 'no answer present .':
     				continue
-    			_candidate['query_id'] = idx
+    			_candidate['query_id'] = int(idx)
     			_candidate['answers'] = [prediction]
     			max_score = score
     	if sample_idx in saved_candidate:
