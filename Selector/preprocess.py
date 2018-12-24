@@ -215,7 +215,7 @@ def get_golden_passage_split(args, split):
     # the output format of an example is golden_passage\tquery\tanswer
     logger.info('loading preprocessed file...')
     inp_file = os.path.join(args.inp_dir, split + '_saved_in_line.txt')
-    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx_full.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx_flag_full.txt')
     to_save = []
     with open(inp_file, 'r') as f:
         exs = f.readlines()
@@ -225,11 +225,8 @@ def get_golden_passage_split(args, split):
             answers = ex.split('\t')[2]
             query_id = ex.split('\t')[-4]
             wellFormedAnswers = ex.split('\t')[-5]
-            if wellFormedAnswers == '"[]"':
-                # continue
-                _answers = answers.split('#@#')
-            else:
-                _answers = json.loads(wellFormedAnswers) #.split('#@#')
+            flag = 0 # flag == 0 means the answer in train/dev sets are standard answers.
+            _answers = answers.split('#@#')
             _passages = passages.split('#@#')
             random.shuffle(_passages)
             random.shuffle(_answers)
@@ -240,7 +237,22 @@ def get_golden_passage_split(args, split):
                 if is_selected == 1:
                     for anw in _answers:
                         if anw.strip():
-                            to_save.append('\t'.join((content, query, anw, query_id, '\n')))
+                            to_save.append('\t'.join((content, query, anw, query_id, str(flag), '\n')))
+            
+            if wellFormedAnswers != '"[]"':
+                flag = 1 # flag == 1 means the answer in train/dev sets are wellFormedAnswers.
+                _answers = json.loads(wellFormedAnswers) #.split('#@#')
+                random.shuffle(_passages)
+                random.shuffle(_answers)
+                for psg in _passages:
+                    parts = psg.split('@@')
+                    is_selected = int(parts[0])
+                    content = parts[1]
+                    if is_selected == 1:
+                        for anw in _answers:
+                            if anw.strip():
+                                to_save.append('\t'.join((content, query, anw, query_id, str(flag), '\n')))
+
     with open(out_file, 'w') as f:
         f.writelines(to_save)
 
@@ -454,7 +466,7 @@ def get_rougeL_multiprocess(args, split):
     # get rougeL of each passage.
     logger.info('loading ' + split + 'file...')
     inp_file = os.path.join(args.inp_dir, split + '_v2.1.json')
-    out_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_wellFormed.txt')
+    out_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_standard.txt')
     pool = Pool(processes=16)
     to_save = []
     with open(inp_file, 'r') as f:
@@ -463,11 +475,11 @@ def get_rougeL_multiprocess(args, split):
         idxs = [idx for idx in idxs]
         for idx in tqdm(idxs, ascii = True, desc = 'progress report:'):  
             query = content['query'][idx]
-            answer = content['wellFormedAnswers'][idx]
-            if answer == '[]':
-                continue
-                # answer = content['answers'][idx][0]
-            answer = answer[0]
+            # answer = content['wellFormedAnswers'][idx]
+            # if answer == '[]':
+            #     continue
+            # answer = answer[0]
+            answer = content['answers'][idx][0]
             passages = content['passages'][idx]
             sample = (query, answer, passages)
             to_save.append(pool.apply_async(process_sample, (sample,)))
@@ -480,8 +492,8 @@ def get_rougeL_multiprocess(args, split):
 def get_nagetive_sample(args, split):
     # get rougeL of each passage.
     logger.info('loading ' + split + 'file...')
-    inp_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_wellFormed.txt')
-    out_file = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_wellFormed_sample.txt')
+    inp_file = os.path.join(args.out_dir, split + '_passages_rougeL_query_answer_standard.txt')
+    out_file = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_standard_sample.txt')
     to_save = []
     with open(inp_file) as f:
         samples = f.readlines()
@@ -545,6 +557,35 @@ def statistic_yes_no(args, split):
     print('start_with_start_words is', start_with_start_words)
     print('start_with_start_words_yes_no is', start_with_start_words_yes_no)
 
+def make_final_dataset(args, split='train'):
+    # get rougeL of each passage.
+    logger.info('loading ' + split + 'file...')
+    inp_file_1 = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx_flag_full.txt')
+    inp_file_2 = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_standard_sample.txt')
+    inp_file_3 = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_wellFormed_sample.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden7_other3_passage_with_query_answer_standard_wellFormed.txt')
+    lines_1 = open(inp_file_1, 'r').readlines()
+    lines_2 = open(inp_file_2, 'r').readlines()
+    lines_3 = open(inp_file_3, 'r').readlines()
+    random.shuffle(lines_1)
+    random.shuffle(lines_2)
+    random.shuffle(lines_3)
+    lines_2 = lines_2[:237857]
+    lines_3 = lines_3[:72628]
+    fake_id_flag_2 = ['666666', '0', '\n']
+    fake_id_flag_3 = ['666666', '1', '\n']
+    for i in range(len(lines_2)):
+        t = lines_2[i].split('\t')[:-1]
+        t.extend(fake_id_flag_2)
+        lines_2[i] = '\t'.join(t)
+    for i in range(len(lines_3)):
+        t = lines_3[i].split('\t')[:-1]
+        t.extend(fake_id_flag_3)
+        lines_3[i] = '\t'.join(t)
+    lines_1.extend(lines_2)
+    lines_1.extend(lines_3)
+    with open(out_file, 'w') as f:
+        f.writelines(lines_1)   
 
 def main():
     # format_file(args)
@@ -553,12 +594,13 @@ def main():
     # count_length_distribution()
     # get_golden_passage(args)
     # get_golden_other_passage(args)
-    format_dev(args, 'dev')
+    # format_dev(args, 'dev')
     # format_dev_1(args, 'dev')
     # get_rougeL(args, 'dev')
-    # get_rougeL_multiprocess(args, 'dev')
-    # get_nagetive_sample(args, 'dev')
+    get_rougeL_multiprocess(args, 'dev')
+    # get_nagetive_sample(args, 'train')
     # statistic_yes_no(args, 'train')
+    # make_final_dataset(args)
 
 
 if __name__ == '__main__':

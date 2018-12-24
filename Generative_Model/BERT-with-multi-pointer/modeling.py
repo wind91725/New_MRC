@@ -593,13 +593,13 @@ class BertWithMultiPointer(nn.Module):
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, input_ids)
-            # probs, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
-            # loss = F.nll_loss(probs.log(), targets)
+            probs, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
+            loss = F.nll_loss(probs.log(), targets)
             # probs_mask = (answer_ids[:, 1:]==0).unsqueeze(-1).expand_as(probs).contiguous()
             # probs[probs_mask] = 0
-            probs = probs.contiguous().view(-1, probs.size(-1))
-            targets = answer_ids[:, 1:].contiguous().view(-1)
-            return (probs, targets), None
+            # probs = probs.contiguous().view(-1, probs.size(-1))
+            # targets = answer_ids[:, 1:].contiguous().view(-1)
+            return loss, None
         else:
             return None, self.greedy(sequence_output, input_ids, answer_ids = answer_ids)
 

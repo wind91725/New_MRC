@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 P_MAX_LENGTH = 240
 Q_MAX_LENGTH = 50
 A_MAX_LENGTH = 100
+random.seed(6666)
 
 class MarcoExample(object):
     """A single training/test example for simple sequence classification."""
@@ -58,11 +59,13 @@ class MarcoExample(object):
                  passage_text,
                  query_text,
                  answer_text,
-                 example_id=None):
+                 example_id=None,
+                 flag = None):
         self.passage_text = passage_text
         self.query_text = query_text
         self.answer_text = answer_text
         self.example_id = example_id
+        self.flag = flag
 
     def __str__(self):
         return self.__repr__()
@@ -100,10 +103,10 @@ def read_msmarco_examples(args, input_file, is_training):
         random.shuffle(data)
         if is_training:
             num_batch = len(data)//args.train_batch_size
-            data = data[:num_batch*args.train_batch_size]
+            data = data[:500000] #[:num_batch*args.train_batch_size]
         else:
             num_batch = len(data)//args.predict_batch_size
-            data = data[:num_batch*args.predict_batch_size]
+            data = data[:60000] #[:num_batch*args.predict_batch_size]
     
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -112,7 +115,7 @@ def read_msmarco_examples(args, input_file, is_training):
 
     examples = []
     for sample in data:
-        sample = sample.split('\t')[:-1] # a list of passage, query, answer and maybe an id
+        sample = sample.split('\t')[:-1] # a list of passage, query, answer and maybe an id and a flag.
         tokens_lists = [[] for _ in range(len(sample))]
         for idx, item in enumerate(sample):
             prev_is_whitespace = True
@@ -128,19 +131,21 @@ def read_msmarco_examples(args, input_file, is_training):
         # print('tokens_lists length is:', len(tokens_lists))
         # exit(0)
 
-        if len(tokens_lists) == 3:
-            passage_text, query_text, answer_text = [' '.join(tokens_list) for tokens_list in tokens_lists]
-            example = MarcoExample(                
-                passage_text=passage_text,
-                query_text=query_text,
-                answer_text=answer_text)
-        elif len(tokens_lists) == 4:
-            passage_text, query_text, answer_text, example_id = [' '.join(tokens_list) for tokens_list in tokens_lists]
+        if len(tokens_lists) == 4:
+            passage_text, query_text, answer_text, flag = [' '.join(tokens_list) for tokens_list in tokens_lists]
             example = MarcoExample(                
                 passage_text=passage_text,
                 query_text=query_text,
                 answer_text=answer_text,
-                example_id=example_id)
+                flag = flag)
+        elif len(tokens_lists) == 5:
+            passage_text, query_text, answer_text, example_id, flag = [' '.join(tokens_list) for tokens_list in tokens_lists]
+            example = MarcoExample(                
+                passage_text=passage_text,
+                query_text=query_text,
+                answer_text=answer_text,
+                example_id=example_id,
+                flag = flag)
 
         examples.append(example)
     return examples
@@ -152,11 +157,13 @@ def convert_examples_to_features(examples, tokenizer, p_max_length,
 
     features = []
     for example in examples:
-        sample = [example.passage_text, example.query_text, example.answer_text, example.example_id]
+        sample = [example.passage_text, example.query_text, example.answer_text, example.example_id, example.flag]
         example_id = None
-        if len(sample) == 4:
-            example_id = sample[-1]
-            sample = sample[:-1]
+        example_flag = None
+        if len(sample) == 5:
+            example_id = sample[-2]
+            example_flag = sample[-1]
+            sample = sample[:-2]
         tokens = [tokenizer.tokenize(item) for item in sample] 
         passage_tokens, query_tokens, answer_tokens = tokens 
         
@@ -198,7 +205,10 @@ def convert_examples_to_features(examples, tokenizer, p_max_length,
 
         tokens = []
         # Add answer to the tokens
-        tokens.append("[CLS]")
+        if example_flag == '1':
+            tokens.append("[CLS]")
+        else:
+            tokens.append("[CLS1]")
         for token in answer_tokens:
             tokens.append(token)
         tokens.append("[SEP]")
@@ -253,7 +263,7 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         param_opti.grad.data.copy_(param_model.grad.data)
     return is_nan
 
-def eval_the_model(args, model, eval_data, device, criterion):
+def eval_the_model(args, model, eval_data):
     if args.local_rank == -1:
         eval_sampler = RandomSampler(eval_data)
     else:
@@ -265,19 +275,19 @@ def eval_the_model(args, model, eval_data, device, criterion):
     n_gpu = torch.cuda.device_count()
 
     for step, batch in enumerate(tqdm(eval_dataloader, desc="Evaluating")):
-        # if n_gpu == 1:
-        batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
+        if n_gpu == 1:
+            batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
 
         input_ids, input_mask, segment_ids, answer_ids, answer_mask, example_id = batch
         # loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
         pred = []
         target = []
-        model_ret = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-        for item in model_ret:
-            pred.append(item[0][0].log())
-            target.append(item[0][1])
-        target = torch.cat(target)
-        loss = criterion(pred, target)
+        loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+        # for item in model_ret:
+        #     pred.append(item[0][0].log())
+        #     target.append(item[0][1])
+        # target = torch.cat(target)
+        # loss = criterion(pred, target)
         eval_loss += loss.mean().detach().cpu()
         eval_batch += 1
     eval_loss /= eval_batch
@@ -518,9 +528,9 @@ def main():
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank)
     elif n_gpu > 1:
-        # model = torch.nn.DataParallel(model)
-        model = DataParallelModel(model)
-        criterion = DataParallelCriterion(torch.nn.NLLLoss(ignore_index=0))
+        model = torch.nn.DataParallel(model)
+        # model = DataParallelModel(model)
+        # criterion = DataParallelCriterion(torch.nn.NLLLoss(ignore_index=0))
 
 
     # Prepare optimizer
@@ -546,7 +556,7 @@ def main():
 
     global_step = 0
     if args.do_train:
-        eval_loss, eval_ppl = eval_the_model(args, model, eval_data, device, criterion)
+        eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
         best_ppl = eval_ppl
         log_path = os.path.join(args.output_dir, 'log.txt.'+args.postfix)
         with open(log_path, 'w') as f:
@@ -568,14 +578,14 @@ def main():
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
                 input_ids, input_mask, segment_ids, answer_ids, answer_mask = batch
-                model_ret = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
-                pred = []
-                target = []
-                for item in model_ret:
-                    pred.append(item[0][0].log())
-                    target.append(item[0][1])
-                target = torch.cat(target)
-                loss = criterion(pred, target)
+                loss, _ = model(input_ids, segment_ids, input_mask, answer_ids=answer_ids, answer_mask=answer_mask)
+                # pred = []
+                # target = []
+                # for item in model_ret:
+                #     pred.append(item[0][0].log())
+                #     target.append(item[0][1])
+                # target = torch.cat(target)
+                # loss = criterion(pred, target)
 
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
@@ -610,7 +620,7 @@ def main():
 
             train_loss /= train_batch
             train_ppl = math.pow(math.e, train_loss)
-            eval_loss, eval_ppl = eval_the_model(args, model, eval_data, device, criterion)
+            eval_loss, eval_ppl = eval_the_model(args, model, eval_data)
             with open(log_path, 'a') as f:
                 f.write('In epoch-' + str(epoch) + ' the average loss on train set is: ' + str(train_loss.float()) + ' the average ppl on train set is: ' + str(train_ppl))
                 f.write('\n')
