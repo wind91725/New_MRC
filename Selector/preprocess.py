@@ -563,15 +563,28 @@ def make_final_dataset(args, split='train'):
     inp_file_1 = os.path.join(args.out_dir, split + '_golden_passage_with_query_answer_idx_flag_full.txt')
     inp_file_2 = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_standard_sample.txt')
     inp_file_3 = os.path.join(args.out_dir, split + '_nagetive_sample_only_from_wellFormed_sample.txt')
-    out_file = os.path.join(args.out_dir, split + '_golden7_other3_passage_with_query_answer_standard_wellFormed.txt')
+    out_file = os.path.join(args.out_dir, split + '_golden7_other3_passage_with_query_answer_standard1_wellFormed1.txt')
     lines_1 = open(inp_file_1, 'r').readlines()
     lines_2 = open(inp_file_2, 'r').readlines()
     lines_3 = open(inp_file_3, 'r').readlines()
     random.shuffle(lines_1)
     random.shuffle(lines_2)
     random.shuffle(lines_3)
-    lines_2 = lines_2[:237857]
-    lines_3 = lines_3[:72628]
+    
+    lines_1_0 = []
+    lines_1_1 = []
+    for line in lines_1:
+        if line[-3] == '0':
+            lines_1_0.append(line)
+        else:
+            lines_1_1.append(line)
+    num_wellFormed = len(lines_1_1)
+    print('num_wellFormed is: ', num_wellFormed)
+    print('int(num_wellFormed/0.7*0.3): ', int(num_wellFormed/0.7*0.3))
+    lines_1_0 = lines_1_0[:num_wellFormed]
+
+    lines_2 = lines_2[:int(num_wellFormed/0.7*0.3)]
+    lines_3 = lines_3[:int(num_wellFormed/0.7*0.3)]
     fake_id_flag_2 = ['666666', '0', '\n']
     fake_id_flag_3 = ['666666', '1', '\n']
     for i in range(len(lines_2)):
@@ -582,6 +595,7 @@ def make_final_dataset(args, split='train'):
         t = lines_3[i].split('\t')[:-1]
         t.extend(fake_id_flag_3)
         lines_3[i] = '\t'.join(t)
+    lines_1 = lines_1_0 + lines_1_1
     lines_1.extend(lines_2)
     lines_1.extend(lines_3)
     with open(out_file, 'w') as f:
@@ -597,10 +611,10 @@ def main():
     # format_dev(args, 'dev')
     # format_dev_1(args, 'dev')
     # get_rougeL(args, 'dev')
-    get_rougeL_multiprocess(args, 'dev')
+    # get_rougeL_multiprocess(args, 'dev')
     # get_nagetive_sample(args, 'train')
     # statistic_yes_no(args, 'train')
-    # make_final_dataset(args)
+    make_final_dataset(args)
 
 
 if __name__ == '__main__':

@@ -649,13 +649,19 @@ def main():
                         return sentence
                 
                     def filter_special(tok):
-                        return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]', '[EOS]']
+                        if not isContext:
+                            return tok not in ['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]', '[EOS]']
+                        else:
+                            return tok not in ['[PAD]', '[UNK]', '[CLS]', '[MASK]', '[EOS]']
                     
                     batch_dim = batch.dim()
                     with torch.cuda.device_of(batch):
                         batch = batch.tolist()
                     batch = [[idx_to_vocab[ind] for ind in ex] for ex in batch] if batch_dim == 2 else [[[idx_to_vocab[ind] for ind in ex]for ex in sample] for sample in batch]
-                    batch = [trim(ex, '[SEP]') for ex in batch] if batch_dim == 2 else [[trim(ex, '[SEP]') for ex in sample] for sample in batch]
+                    if not isContext:
+                        batch = [trim(ex, '[SEP]') for ex in batch] if batch_dim == 2 else [[trim(ex, '[SEP]') for ex in sample] for sample in batch]
+                    # else:
+                    #     batch = [trim(ex, '[PAD]') for ex in batch] if batch_dim == 2 else [[trim(ex, '[PAD]') for ex in sample] for sample in batch]
                     batch = [filter(filter_special, ex) for ex in batch] if batch_dim ==2 else [[filter(filter_special, ex) for ex in sample] for sample in batch]
 
                     return [' '.join(ex) if ex != None else '' for ex in batch] if batch_dim ==2 else [[' '.join(ex) if ex != None else '' for ex in sample] for sample in batch]
@@ -665,36 +671,22 @@ def main():
                     outs, answer_scores = outs
                     outs = outs.data
                     answer_scores = answer_scores.tolist()
-                # ground_trurhs = decode_to_vocab(answer_ids)
                 decode_answers = decode_to_vocab(outs)
-                # decode_contexts = decode_to_vocab(input_ids, isContext=True)
+                decode_contexts = decode_to_vocab(input_ids, isContext=True)
+                # print('decoder_context is:', decode_contexts)
+                # print('decoder_context length is:', len(decode_contexts))
+                # print('input_ids size is:', input_ids.size())
+                # print('outs size is:', outs.size())
 
-        #         example_id = example_id.tolist()
-        #         for answer_idx, answer_text in zip(example_id, decode_answers):
-        #             # print(answer_idx)
-        #             answer_dict = {}
-        #             answer_text = answer_text.replace(" ##", "")
-        #             answer_text = answer_text.replace("##", "")
-        #             answer_dict['query_id'] = str(answer_idx)
-        #             answer_dict['answers'] = [answer_text]
-        #             to_save.append(json.dumps(answer_dict) + "\n")
                 query_ids = query_ids.tolist()
-                for i, (answer, answer_score, query_id) in enumerate(zip(decode_answers, answer_scores, query_ids)):
-                    # print('context is:\n', context.replace(" ##", ""))
-                    # print('ground truth is:\n', ground_trurh.replace(" ##", ""))
-                    # print('answer is:\n', answer.replace(" ##", ""))
+                for i, (answer, answer_score, query_id, contexts) in enumerate(zip(decode_answers, answer_scores, query_ids, decode_contexts)):
                     if outs.dim() == 3:
-                        for ans, ans_score in zip(answer, answer_score):
-                            answer_length = len(ans.split(' '))
-                            # print('query_id is ', query_id)
-                            # print('ans_score is ', ans_score)
-                            # print('ground_trurh is ', ground_trurh)
-                            # print('ans is ', ans)
-                            
-                            to_save.append('\t'.join([str(query_id), ans.replace(" ##", ""), str(1.*ans_score[0]/answer_length), '\n']))
-                    else:
-                        answer_length = len(answer.split(' '))
-                        to_save.append('\t'.join([query_id, answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
+                        for ans, ans_score, context in zip(answer, answer_score, contexts):
+                            answer_length = len(ans.split(' '))   
+                            to_save.append('\t'.join([str(query_id), context.replace(" ##", ""), ans.replace(" ##", ""), str(1.*ans_score[0]/answer_length), '\n']))
+                    # else:
+                    #     answer_length = len(answer.split(' '))
+                    #     to_save.append('\t'.join([query_id, context.replace(" ##", ""), answer.replace(" ##", ""), str(1.*answer_score/answer_length), '\n']))
 
         output_answer_file = os.path.join(args.output_dir, 'predictions', 'predictions.txt.'+args.postfix)
         with open(output_answer_file, "w") as f:
