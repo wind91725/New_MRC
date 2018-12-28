@@ -565,6 +565,8 @@ class BertWithMultiPointer(nn.Module):
             self.project = nn.Linear(decoder_dim, config.hidden_size)
             self.out.weight = self.decoderEmbedding.word_embeddings.weight
 
+        # Paragraph Selector Decoder
+
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         
         self.reshape = False
