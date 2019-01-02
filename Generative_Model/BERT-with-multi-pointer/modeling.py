@@ -566,6 +566,8 @@ class BertWithMultiPointer(nn.Module):
             self.out.weight = self.decoderEmbedding.word_embeddings.weight
 
         # Paragraph Selector Decoder
+        # self.ps_dropout = nn.Dropout(config.hidden_dropout_prob)
+        # self.ps_classifier = nn.Linear(config.hidden_size, 1)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         
@@ -578,7 +580,7 @@ class BertWithMultiPointer(nn.Module):
             attention_mask = attention_mask.view(new_size)
             self.reshape = True
 
-        all_encoder_layers, _ = self.bert(input_ids, token_type_ids, attention_mask)
+        all_encoder_layers, pooled_output = self.bert(input_ids, token_type_ids, attention_mask)
         sequence_output = all_encoder_layers[-1]
         sequence_output = self.ln_context(self.linear_context(sequence_output)) if self.reduce_dim>0 else sequence_output
         
@@ -595,8 +597,15 @@ class BertWithMultiPointer(nn.Module):
             context_question_outputs, context_question_attention, context_question_alignments, vocab_pointer_switches, hidden = decoder_outputs
 
             probs = self.probs(self.out, context_question_outputs, vocab_pointer_switches, context_question_attention, input_ids)
-            probs, targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
-            loss = F.nll_loss(probs.log(), targets)
+            probs, gen_targets = mask(answer_ids[:, 1:].contiguous(), probs.contiguous(), pad_idx=0)
+
+            # paragraph selector score
+            # pooled_output = self.ps_dropout(pooled_output)
+            # ps_score = self.ps_classifier(pooled_output)
+            # ps_score = ps_score.view(self.ori_size[0], self.ori_size[1])
+            
+            loss = F.nll_loss(probs.log(), gen_targets) + F.kl_div(F.log_softmax(ps_score, 1), ps_targets)
+
             # probs_mask = (answer_ids[:, 1:]==0).unsqueeze(-1).expand_as(probs).contiguous()
             # probs[probs_mask] = 0
             # probs = probs.contiguous().view(-1, probs.size(-1))
@@ -615,7 +624,7 @@ class BertWithMultiPointer(nn.Module):
         answer_scores = self_attended_context.new_zeros((B, ))
         for t in range(T):
             if t == 0:
-                embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 101, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
+                embedding = self.decoderEmbedding(self_attended_context.new_full((B, 1), 99, dtype=torch.long), position=t) # the index of "[CLS]" is 101 
             else:
                 embedding = self.decoderEmbedding(outs[:, t - 1].unsqueeze(1), position=t)
             embedding = self.ln_answer(self.linear_answer(embedding)) if self.reduce_dim>0 else embedding

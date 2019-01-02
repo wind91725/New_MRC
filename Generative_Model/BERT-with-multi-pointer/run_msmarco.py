@@ -103,7 +103,7 @@ def read_msmarco_examples(args, input_file, is_training):
         random.shuffle(data)
         if is_training:
             num_batch = len(data)//args.train_batch_size
-            data = data[:500000] #[:num_batch*args.train_batch_size]
+            data = data #[:num_batch*args.train_batch_size]
         else:
             num_batch = len(data)//args.predict_batch_size
             data = data[:60000] #[:num_batch*args.predict_batch_size]
