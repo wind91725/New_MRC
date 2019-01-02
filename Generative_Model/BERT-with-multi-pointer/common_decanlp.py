@@ -354,7 +354,7 @@ class Feedforward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.activation(self.linear(self.dropout(x)))
+        return self.dropout(self.activation(self.linear(x)))  # XD
 
 
 # class Embedding(nn.Module):
