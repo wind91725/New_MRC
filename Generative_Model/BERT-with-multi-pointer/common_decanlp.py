@@ -86,7 +86,7 @@ def pad_to_match(x, y):
     return x, torch.cat((y, extra), 1)
 
 
-class LayerNorm(nn.Module):
+class DecaNLPLayerNorm(nn.Module):
 
     def __init__(self, d_model, eps=1e-6):
         super().__init__()
@@ -98,6 +98,9 @@ class LayerNorm(nn.Module):
         mean = x.mean(-1, keepdim=True)
         std = x.std(-1, keepdim=True)
         return self.gamma * (x - mean) / (std + self.eps) + self.beta
+
+
+LayerNorm = nn.LayerNorm  # XD
 
 
 class ResidualBlock(nn.Module):
@@ -116,7 +119,7 @@ class Attention(nn.Module):
 
     def __init__(self, d_key, dropout_ratio, causal):
         super().__init__()
-        self.scale = math.sqrt(d_key)
+        self.scale = math.sqrt(d_key)  # XD: should be math.sqrt(d_key // n_heads)
         self.dropout = nn.Dropout(dropout_ratio)
         self.causal = causal
 
@@ -130,7 +133,7 @@ class Attention(nn.Module):
         return matmul(self.dropout(F.softmax(dot_products / self.scale, dim=-1)), value)
 
 
-class MultiHead(nn.Module):
+class MultiHeadSlow(nn.Module):
 
     def __init__(self, d_key, d_value, n_heads, dropout_ratio, causal=False):
         super().__init__()
@@ -146,6 +149,141 @@ class MultiHead(nn.Module):
             x.chunk(self.n_heads, -1) for x in (query, key, value))
         return torch.cat([self.attention(q, k, v, padding=padding)
                           for q, k, v in zip(query, key, value)], -1)
+
+
+# XD: adapted from fairseq transformer
+class MultiHead(nn.Module):
+    def __init__(self, d_key, d_value, n_heads, dropout_ratio, causal=False):
+        super().__init__()
+        assert d_key == d_value
+        self.embed_dim = d_key
+        self.num_heads = n_heads
+        self.dropout = dropout_ratio
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        self.scaling = self.head_dim**-0.5
+        self._mask = None
+        self.causal = causal  # XD
+
+        self.in_proj_weight = Parameter(torch.Tensor(3*embed_dim, embed_dim))
+        if bias:
+            self.in_proj_bias = Parameter(torch.Tensor(3*embed_dim))
+        else:
+            self.register_parameter('in_proj_bias', None)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        # self.reset_parameters()  # XD: initialized in BertWithMultiPointer.__init__
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        if self.in_proj_bias is not None:
+            nn.init.constant_(self.in_proj_bias, 0.)
+            nn.init.constant_(self.out_proj.bias, 0.)
+
+    def forward(self, query, key, value, padding=None):
+        """Input shape: Time x Batch x Channel
+
+        Self-attention can be implemented by passing in the same arguments for
+        query, key and value. Future timesteps can be masked with the
+        `mask_future_timesteps` argument. Padding elements can be excluded from
+        the key by passing a binary ByteTensor (`key_padding_mask`) with shape:
+        batch x src_len, where padding elements are indicated by 1s.
+        """
+
+        mask_future_timesteps = self.causal  # XD
+        key_padding_mask = padding  # XD
+
+        qkv_same = query.data_ptr() == key.data_ptr() == value.data_ptr()
+        kv_same = key.data_ptr() == value.data_ptr()
+        assert qkv_same or kv_same  # XD
+
+        tgt_len, bsz, embed_dim = query.size()
+        assert embed_dim == self.embed_dim
+        assert list(query.size()) == [tgt_len, bsz, embed_dim]
+        assert key.size() == value.size()
+
+        if qkv_same:
+            # self-attention
+            q, k, v = self.in_proj_qkv(query)
+        elif kv_same:
+            # encoder-decoder attention
+            q = self.in_proj_q(query)
+            k, v = self.in_proj_kv(key)
+        else:
+            q = self.in_proj_q(query)
+            k = self.in_proj_k(key)
+            v = self.in_proj_v(value)
+        q *= self.scaling
+
+        src_len = k.size(0)
+        if key_padding_mask is not None:
+            assert key_padding_mask.size(0) == bsz
+            assert key_padding_mask.size(1) == src_len
+
+        q = q.contiguous().view(tgt_len, bsz*self.num_heads, self.head_dim).transpose(0, 1)
+        k = k.contiguous().view(src_len, bsz*self.num_heads, self.head_dim).transpose(0, 1)
+        v = v.contiguous().view(src_len, bsz*self.num_heads, self.head_dim).transpose(0, 1)
+        attn_weights = torch.bmm(q, k.transpose(1, 2))
+        assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
+
+        # only apply masking at training time (when incremental state is None)
+        if mask_future_timesteps: # and incremental_state is None:
+            assert query.size() == key.size(), \
+                'mask_future_timesteps only applies to self-attention'
+            attn_weights += self.buffered_mask(attn_weights).unsqueeze(0)
+        if key_padding_mask is not None:
+            # don't attend to padding symbols
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights.float().masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
+                float('-inf'),
+            ).type_as(attn_weights)  # FP16 support: cast to float and back
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+        attn_weights = F.softmax(attn_weights.float(), dim=-1).type_as(attn_weights)
+        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+
+        attn = torch.bmm(attn_weights, v)
+        assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
+        attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+        attn = self.out_proj(attn)
+        return attn
+
+    def in_proj_qkv(self, query):
+        return self._in_proj(query).chunk(3, dim=-1)
+
+    def in_proj_kv(self, key):
+        return self._in_proj(key, start=self.embed_dim).chunk(2, dim=-1)
+
+    def in_proj_q(self, query):
+        return self._in_proj(query, end=self.embed_dim)
+
+    def in_proj_k(self, key):
+        return self._in_proj(key, start=self.embed_dim, end=2*self.embed_dim)
+
+    def in_proj_v(self, value):
+        return self._in_proj(value, start=2*self.embed_dim)
+
+    def _in_proj(self, input, start=0, end=None):
+        # XD: for in_proj_kv
+        if False and self.shared_attn_module is not None and start == self.embed_dim and end is None:
+            weight = self.shared_attn_module.in_proj_weight
+            bias = self.shared_attn_module.in_proj_bias
+        else:
+            weight = self.in_proj_weight
+            bias = self.in_proj_bias
+        weight = weight[start:end, :]
+        if bias is not None:
+            bias = bias[start:end]
+        return F.linear(input, weight, bias)
+
+    def buffered_mask(self, tensor):
+        dim = tensor.size(-1)
+        if self._mask is None:
+            self._mask = torch.triu(utils.fill_with_neg_inf(tensor.new(dim, dim)), 1)
+        if self._mask.size(0) < dim:
+            self._mask = torch.triu(utils.fill_with_neg_inf(self._mask.resize_(dim, dim)), 1)
+        return self._mask[:dim, :dim]
+
 
 class MultiHead_decoder(nn.Module):
 
