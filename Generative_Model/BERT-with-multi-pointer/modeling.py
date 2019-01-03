@@ -545,29 +545,29 @@ class BertWithMultiPointer(nn.Module):
             elif isinstance(module, BERTLayerNorm):
                 module.beta.data.normal_(mean=0.0, std=config.initializer_range)
                 module.gamma.data.normal_(mean=0.0, std=config.initializer_range)
-            if isinstance(module, nn.Linear):
+            if isinstance(module, nn.Linear) and module.bias is not None:  # XD
                 module.bias.data.zero_()
-        self.apply(init_weights)
         
         decoder_dim = config.hidden_size
         if self.reduce_dim > 0:
             decoder_dim = self.reduce_dim
-            self.linear_answer = nn.Linear(config.hidden_size, decoder_dim)
-            self.linear_context = nn.Linear(config.hidden_size, decoder_dim)
+            self.linear_answer = nn.Linear(config.hidden_size, decoder_dim, bias=False)  # XD
+            self.linear_context = nn.Linear(config.hidden_size, decoder_dim, bias=False)  # XD
             self.ln_answer = LayerNorm(decoder_dim)
             self.ln_context = LayerNorm(decoder_dim)
 
         self.self_attentive_decoder = TransformerDecoder(decoder_dim, int(decoder_dim/64), decoder_dim*4, self.decoder_layer, 0.2)
         self.dual_ptr_rnn_decoder = DualPtrRNNDecoder(decoder_dim, decoder_dim, dropout=0.2)
         self.vocab_size = config.vocab_size
-        self.out = nn.Linear(decoder_dim, self.vocab_size)
+        self.out = nn.Linear(decoder_dim, self.vocab_size, bias=False)  # XD
         if self.share_decoder_embedd:
-            self.project = nn.Linear(decoder_dim, config.hidden_size)
+            self.project = nn.Linear(decoder_dim, config.hidden_size, bias=False)  # XD
             self.out.weight = self.decoderEmbedding.word_embeddings.weight
 
         # Paragraph Selector Decoder
         # self.ps_dropout = nn.Dropout(config.hidden_dropout_prob)
         # self.ps_classifier = nn.Linear(config.hidden_size, 1)
+        self.apply(init_weights)
 
     def forward(self, input_ids, token_type_ids, attention_mask, start_positions=None, end_positions=None, answer_ids=None, answer_mask=None):
         
@@ -685,11 +685,13 @@ class DualPtrRNNDecoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = nn.Dropout(dropout)
 
-        self.context_question_attn = LSTMDecoderAttention(d_hid, dot=True)
+        self.context_question_attn = LSTMDecoderAttention(d_hid, dot=True)  # XD: tried dot=False?
 
-        self.vocab_pointer_switch = nn.Sequential(Feedforward(self.d_hid + d_in, 1), nn.Sigmoid())
+        # self.vocab_pointer_switch = nn.Sequential(Feedforward(self.d_hid + d_in, 1), nn.Sigmoid())
+        self.vocab_pointer_switch = nn.Sequential(nn.Dropout(dropout), nn.Linear(self.d_hid + d_in, 1), nn.Sigmoid())  # XD
         
-    def forward(self, input, context_question, output=None, hidden=None, context_question_alignment=None):
+    # XD: to slow, need to be optimized to be fully parallel    
+    def forward_slow(self, input, context_question, output=None, hidden=None, context_question_alignment=None):
         context_question_alignment = context_question_alignment if context_question_alignment is not None else self.make_init_output(context_question)
 
         context_question_outputs, vocab_pointer_switches, context_question_attentions, context_question_alignments = [], [], [], []
